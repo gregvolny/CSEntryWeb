@@ -24,3 +24,29 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# cspro-dev build artifacts and large files
+cspro-dev/**/build/
+cspro-dev/**/Debug/
+cspro-dev/**/Release/
+cspro-dev/**/x64/
+cspro-dev/**/*.obj
+cspro-dev/**/*.pdb
+cspro-dev/**/*.exe
+cspro-dev/**/*.dll
+cspro-dev/**/*.lib
+cspro-dev/**/*.exp
+cspro-dev/**/*.ilk
+cspro-dev/**/*.idb
+cspro-dev/**/*.ipch
+cspro-dev/**/*.tlog
+cspro-dev/**/*.lastbuildstate
+cspro-dev/**/*.aps
+cspro-dev/**/*.ncb
+cspro-dev/**/*.sdf
+cspro-dev/**/*.suo
+cspro-dev/**/*.user
+cspro-dev/**/.vs/
+cspro-dev/**/ipch/
+*.wasm
+*.data
