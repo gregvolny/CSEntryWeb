@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+
+    <link rel="stylesheet" href="/css/dialogs.css">
+
+    <!-- Action invoker - detect web mode and use appropriate version -->
+    <script>
+        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
+                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
+                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        
+        if (isWebMode) {
+            console.log('[Image-takePhoto] Running in web mode');
+            // Web mode - load web action invoker
+            document.write('<script src="action-invoker-web.js"><\/script>');
+        } else {
+            console.log('[Image-takePhoto] Running in native mode, loading action-invoker.js');
+            document.write('<script src="/action-invoker.js"><\/script>');
+        }
+    </script>
+
+    <title>CSPro Photo Capture</title>
+</head>
+<body>
+    <p id="message" style="visibility: hidden"></p>
+    <p><img id="photo" /></p>
+
+    <p><a href="#" onclick="savePhoto(); return false;">Save</a> - <a href="#" onclick="clearPhoto(); return false;">Clear</a></p>
+
+    <script>
+        const message = document.getElementById("message");
+        const photo = document.getElementById("photo");
+        
+        // Initialize CS based on mode
+        let CS;
+        if (typeof isWebMode !== 'undefined' && isWebMode) {
+            CS = new CSProActionInvoker('');
+            window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
+            console.log('[Image-takePhoto] Sent cspro-dialog-ready to parent');
+            
+            // Listen for initialization message from parent via cspro-input-ready event
+            window.addEventListener('cspro-input-ready', (event) => {
+                console.log('[Image-takePhoto] Received cspro-input-ready:', event.detail);
+                initializePhotoDialog();
+            });
+            
+            // Check if already initialized
+            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+                initializePhotoDialog();
+            }
+        } else {
+            CS = new CSProActionInvoker("55a9993fbd65fbbbcef06d29dfc7cb31");
+            // Native mode - initialize immediately
+            initializePhotoDialog();
+        }
+        
+        function initializePhotoDialog() {
+            const input = CS.UI.getInputData();
+            console.log('[Image-takePhoto] Input data:', input);
+
+            // size the dialog at half the screen
+            const dimensions = CS.UI.getMaxDisplayDimensions();
+            CS.UI.setDisplayOptions({
+                width: dimensions.width / 2,
+                height: dimensions.height / 2,
+                keyboard: false
+            });
+
+            // if set, display the message
+            if( input.message ) {
+                message.innerText = input.message;
+                message.style.visibility = "visible";
+            }
+
+            // if a photo already exists, show it
+            if( input.url ) {
+                photo.src = input.url;
+            }
+        }
+
+        function savePhoto() {
+            // TODO ... make sure not blank
+            // https://stackoverflow.com/questions/934012/get-image-data-url-in-javascript
+            const canvas = document.createElement("canvas");
+            canvas.width = photo.width;
+            canvas.height = photo.height;
+
+             // Copy the image contents to the canvas
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(photo, 0, 0);
+
+            CS.UI.closeDialog({ result: { url: canvas.toDataURL() } });
+        }
+
+        function clearPhoto() {
+            photo.removeAttribute("src");
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+﻿[Run Information]
+Version=CSPro 8.0
+AppType=Entry
+Description=Popstan Census Household Questionnaire
+ShowInApplicationListing=Never
+
+[DataEntryInit]
+FullScreen=Yes
+
+[Files]
+Application=.\Household.ent
+InputData=..\Data\Household.csdb
+Paradata=..\Data\Household.cslog
+
+[Parameters]
+OnExit=..\Menu\Menu.pff

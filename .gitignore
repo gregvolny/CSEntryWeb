@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# WASM binary files (large, should be built or downloaded separately)
+CSPro.wasm
+CSPro.data
+
+# Runtime data
+storage/applications/*/data/
+storage/temp/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local

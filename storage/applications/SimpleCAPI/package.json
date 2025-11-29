@@ -1,0 +1,30 @@
+{
+  "software": "CSPro", 
+  "version": 8.0, 
+  "fileType": "deployment", 
+  "name": "Simple CAPI", 
+  "description": "", 
+  "buildTime": "2025-11-26T02:41:49Z", 
+  "files": [
+    {
+      "path": "Simple CAPI.pen", 
+      "signature": "40E3C177DA9DBB906D9B3D00EC75BEB8"
+    }, 
+    {
+      "path": "Simple CAPI.pff", 
+      "signature": "C0A607F35AFFFA1AF085306D7E245551"
+    }
+  ], 
+  "dictionaries": [
+    {
+      "path": "Simple CAPI.dcf", 
+      "uploadForSync": true
+    }
+  ], 
+  "deployment": {
+    "type": "LocalFolder", 
+    "cswebUrl": "https://datasolution-and.systems/datacloud/api", 
+    "ftpUrl": "ftp://", 
+    "localFolderPath": "..\\SimpleCAPI"
+  }
+}
