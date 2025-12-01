@@ -171,7 +171,7 @@ router.get('/session/:sessionId/status', async (req, res) => {
  */
 router.post('/session/:sessionId/load', async (req, res) => {
     const { sessionId } = req.params;
-    const { pffContent, applicationFiles } = req.body;
+    const { pffContent, applicationFiles, appName } = req.body;
 
     if (!pffContent) {
         return res.status(400).json({
@@ -184,7 +184,8 @@ router.post('/session/:sessionId/load', async (req, res) => {
         const result = await wasmService.loadApplication(
             sessionId,
             pffContent,
-            applicationFiles || {}
+            applicationFiles || {},
+            appName
         );
         res.json(result);
     } catch (error) {
@@ -273,6 +274,48 @@ router.delete('/session/:sessionId', (req, res) => {
     }
 });
 
+/**
+ * Get list of all cases in data file
+ * Maps to: GetSequentialCaseIds (WASM)
+ */
+router.get('/session/:sessionId/cases', async (req, res) => {
+    const { sessionId } = req.params;
+
+    try {
+        const cases = await wasmService.getSequentialCaseIds(sessionId);
+        res.json({
+            success: true,
+            cases: cases || []
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Modify (open) a case by position
+ * Maps to: ModifyCase (WASM)
+ */
+router.post('/session/:sessionId/modify-case', async (req, res) => {
+    const { sessionId } = req.params;
+    const { position } = req.body;
+
+    try {
+        const result = await wasmService.modifyCase(sessionId, position);
+        res.json({
+            success: result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // ==================== FORM/PAGE STATE ====================
 // Maps to: GetFormFileInProcess, C_FldGetCurrent
 
@@ -304,6 +347,10 @@ router.get('/session/:sessionId/form-data', async (req, res) => {
 
     try {
         const formData = await wasmService.getFormData(sessionId);
+        
+        // Debug logging for form boxes - REMOVED
+
+        
         res.json(formData);
     } catch (error) {
         res.status(500).json({
@@ -409,8 +456,11 @@ router.post('/session/:sessionId/previous', async (req, res) => {
  */
 router.post('/session/:sessionId/goto', async (req, res) => {
     const { sessionId } = req.params;
-    const { fieldSymbol, fieldName } = req.body;
+    const { fieldSymbol, fieldName, occurrence1 = 1, occurrence2 = 0, occurrence3 = 0 } = req.body;
     const field = fieldSymbol || fieldName;
+
+    console.log('[API /goto] Request body:', req.body);
+    console.log('[API /goto] Extracted values:', { field, occurrence1, occurrence2, occurrence3 });
 
     if (!field) {
         return res.status(400).json({
@@ -420,7 +470,7 @@ router.post('/session/:sessionId/goto', async (req, res) => {
     }
 
     try {
-        const result = await wasmService.goToField(sessionId, field);
+        const result = await wasmService.goToField(sessionId, field, occurrence1, occurrence2, occurrence3);
         const page = await wasmService.getCurrentPage(sessionId);
         
         res.json({
@@ -869,6 +919,55 @@ router.post('/session/:sessionId/action', async (req, res) => {
         res.json({
             success: true,
             result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Submit a response to a pending dialog
+ */
+router.post('/session/:sessionId/dialog', async (req, res) => {
+    const { sessionId } = req.params;
+    const { response } = req.body;
+
+    if (!response) {
+        return res.status(400).json({
+            success: false,
+            error: 'Response data is required'
+        });
+    }
+
+    try {
+        const result = await wasmService.submitDialogResponse(sessionId, response);
+        
+        // If the result is still a dialog (chained dialogs), return it
+        if (result.status === 'dialog') {
+            return res.json(result);
+        }
+        
+        // Otherwise, return the result of the resumed operation
+        // We might need to fetch the current page if the operation was a navigation
+        // But the result from executeWasmWithDialogHandling is just the raw result of the function
+        // We need to know what the original operation was to construct the correct response
+        // However, for simplicity, we can just return the generic result and let the client refresh the page
+        
+        // Better: Always return the current page state after a dialog interaction
+        let page = null;
+        try {
+            page = await wasmService.getCurrentPage(sessionId);
+        } catch (e) {
+            // Ignore if page fetch fails (e.g. if entry ended)
+        }
+        
+        res.json({
+            success: true,
+            result: result.result,
+            page
         });
     } catch (error) {
         res.status(500).json({

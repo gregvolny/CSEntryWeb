@@ -106,61 +106,88 @@ export class DialogHandler {
      * Show a value set selection dialog using native CSPro select.html
      * @param {Object} field - Field data
      * @param {Array} responses - Array of responses
+     * @param {string} questionText - Optional question text HTML to display
      * @returns {Promise<string|null>} Selected value code or null if cancelled
      */
-    async showValueSetDialog(field, responses) {
-        console.log('[DialogHandler] Showing value set dialog:', field.name, responses.length, 'responses');
+    async showValueSetDialog(field, responses, questionText = '', currentValue = '') {
+        console.log('[DialogHandler] Showing value set dialog:', field.name, responses.length, 'responses', 'current:', currentValue);
         
         if (!responses || responses.length === 0) {
             return null;
         }
         
-        const title = field.label || field.name || 'Select Value';
+        // Use question text if provided, otherwise fall back to label/name
+        // If questionText contains a full HTML document (<!doctype or <html>), use field label instead
+        let title = questionText || field.label || field.name || 'Select Value';
+        if (title && (title.includes('<!doctype') || title.includes('<html>'))) {
+            console.log('[DialogHandler] Question text contains full HTML document, using field label instead');
+            title = field.label || field.name || 'Select Value';
+        }
+        console.log('[DialogHandler] Dialog title:', title);
         
-        // Build input data in the format expected by CSPro select.html dialog
+        // Find the index of the current value in responses
+        let defaultIndex = -1;
+        if (currentValue !== null && currentValue !== undefined && currentValue !== '') {
+            const currentValueStr = String(currentValue).trim();
+            defaultIndex = responses.findIndex(resp => String(resp.code).trim() === currentValueStr);
+            console.log('[DialogHandler] Current value:', currentValueStr, 'found at index:', defaultIndex);
+        }
+        
+        // Build input data in the format expected by CSPro choice.html dialog (single selection)
+        // Allow direct input only for numeric ComboBox fields (captureType 4)
+        const isComboBox = field.captureType === 4;
+        const allowDirectInput = isComboBox && field.isNumeric;
+        
         const inputData = {
             title: title,
-            header: [
-                { caption: '' },  // Code column (can be hidden or shown)
-                { caption: '' }   // Label column
-            ],
-            rows: responses.map((resp, idx) => {
-                // Convert textColor from int to CSS color
-                let textColor = 'inherit';
-                if (resp.textColor && resp.textColor !== 0) {
-                    const r = (resp.textColor >> 16) & 0xFF;
-                    const g = (resp.textColor >> 8) & 0xFF;
-                    const b = resp.textColor & 0xFF;
-                    textColor = `rgb(${r},${g},${b})`;
-                }
+            defaultIndex: defaultIndex >= 0 ? defaultIndex : -1,
+            allowDirectInput: allowDirectInput,
+            choices: responses.map((resp, idx) => {
+                // Build caption with code and label
+                const code = String(resp.code);
+                const label = resp.label || '';
+                const caption = label ? `${code} - ${label}` : code;
+                
                 return {
                     index: idx,
-                    textColor: textColor,
-                    columns: [
-                        { text: String(resp.code) },
-                        { text: resp.label || '' }
-                    ]
+                    caption: caption
                 };
-            }),
-            multiple: false
+            })
         };
         
+        // Add field properties for numeric ComboBox direct input
+        if (allowDirectInput) {
+            inputData.fieldLength = field.length || field.len || 3;
+            inputData.decimalPlaces = field.decimalPlaces ?? field.decimal ?? 0;
+            inputData.showTickMarks = true; // Always show tick marks for numeric fields
+            inputData.currentValue = currentValue;
+        }
+        
+        console.log('[DialogHandler] showValueSetDialog inputData:', JSON.stringify(inputData, null, 2));
+        console.log('[DialogHandler] field.captureType:', field.captureType, 'field.isNumeric:', field.isNumeric);
+        
         try {
-            // Use native CSPro select.html dialog
-            const resultJson = await this._showIframeDialog('/dialogs/select.html', inputData);
-            console.log('[DialogHandler] Select dialog result:', resultJson);
+            // Use native CSPro choice.html dialog (single selection with defaultIndex support)
+            const resultJson = await this._showIframeDialog('/dialogs/choice.html', inputData);
+            console.log('[DialogHandler] Choice dialog result:', resultJson);
             
             if (resultJson) {
                 let result = JSON.parse(resultJson);
-                // Handle nested result structure: { result: { rowIndices: [...] } }
+                // Handle nested result structure: { result: { index: N } } or { result: { value: "123" } }
                 if (result.result) {
                     result = result.result;
                 }
-                // select.html returns { rowIndices: [idx] } or nothing if cancelled
-                if (result.rowIndices && result.rowIndices.length > 0) {
-                    const selectedIdx = result.rowIndices[0];
-                    const selectedResp = responses[selectedIdx];
-                    console.log('[DialogHandler] Selected index:', selectedIdx, 'response:', selectedResp);
+                
+                // Check if user entered a direct value (for numeric ComboBox)
+                if (result.value !== undefined && result.value !== '') {
+                    console.log('[DialogHandler] Direct input value:', result.value);
+                    return result.value;
+                }
+                
+                // choice.html returns { index: N } or nothing if cancelled
+                if (result.index !== undefined && result.index >= 0) {
+                    const selectedResp = responses[result.index];
+                    console.log('[DialogHandler] Selected index:', result.index, 'response:', selectedResp);
                     if (selectedResp) {
                         return selectedResp.code;
                     }
@@ -168,7 +195,7 @@ export class DialogHandler {
             }
             return null;
         } catch (e) {
-            console.error('[DialogHandler] Select dialog error:', e);
+            console.error('[DialogHandler] Choice dialog error:', e);
             return null;
         }
     }
@@ -179,16 +206,24 @@ export class DialogHandler {
      * @param {Object} field - Field data with label/name
      * @param {Array} responses - Array of responses with code, label, textColor
      * @param {string} currentValue - Current combined value (e.g., "010203")
+     * @param {string} questionText - Optional question text HTML to display
      * @returns {Promise<string|null>} Combined selected codes or null if cancelled
      */
-    async showCheckboxSelectionDialog(field, responses, currentValue = '') {
+    async showCheckboxSelectionDialog(field, responses, currentValue = '', questionText = '') {
         console.log('[DialogHandler] Showing checkbox selection dialog using native select.html:', field.name, responses.length, 'responses');
         
         if (!responses || responses.length === 0) {
             return null;
         }
         
-        const title = field.label || field.name || 'Select Values';
+        // Use question text if provided, otherwise fall back to label/name
+        // If questionText contains a full HTML document (<!doctype or <html>), use field label instead
+        let title = questionText || field.label || field.name || 'Select Values';
+        if (title && (title.includes('<!doctype') || title.includes('<html>'))) {
+            console.log('[DialogHandler] Question text contains full HTML document, using field label instead');
+            title = field.label || field.name || 'Select Values';
+        }
+        console.log('[DialogHandler] Checkbox dialog title:', title);
         
         // Build input data in the format expected by CSPro select.html dialog
         // with multiple: true for checkbox/multi-select behavior
@@ -252,13 +287,157 @@ export class DialogHandler {
     }
     
     /**
+     * Show a slider dialog for numeric input with min/max range
+     * @param {Object} field - Field data with label/name
+     * @param {string|number} currentValue - Current value
+     * @param {number} minValue - Minimum slider value
+     * @param {number} maxValue - Maximum slider value
+     * @returns {Promise<string|null>} Selected value or null if cancelled
+     */
+    async showSliderDialog(field, currentValue = '', minValue = 0, maxValue = 100) {
+        console.log('[DialogHandler] Showing slider dialog:', field.name, 'min:', minValue, 'max:', maxValue);
+        
+        const title = field.label || field.name || 'Select Value';
+        const initialValue = currentValue !== '' ? Number(currentValue) : minValue;
+        
+        return new Promise((resolve) => {
+            const dialogHtml = `
+                <div class="dialog-slider">
+                    <div class="dialog-slider-title">${escapeHtml(title)}</div>
+                    <div class="dialog-slider-container">
+                        <input type="range" id="dialog-slider-input" 
+                               min="${minValue}" max="${maxValue}" value="${initialValue}"
+                               style="width: 100%; margin: 20px 0;">
+                        <div class="dialog-slider-labels" style="display: flex; justify-content: space-between;">
+                            <span>${minValue}</span>
+                            <span id="dialog-slider-value" style="font-weight: bold; font-size: 18px;">${initialValue}</span>
+                            <span>${maxValue}</span>
+                        </div>
+                    </div>
+                    <div class="dialog-slider-buttons" style="margin-top: 20px; text-align: right;">
+                        <button type="button" data-action="cancel" style="margin-right: 10px;">Cancel</button>
+                        <button type="button" data-action="ok" class="default-button">OK</button>
+                    </div>
+                </div>
+            `;
+            
+            this.dialogContainer.innerHTML = dialogHtml;
+            this.dialogOverlay.style.display = 'block';
+            
+            const slider = this.dialogContainer.querySelector('#dialog-slider-input');
+            const valueDisplay = this.dialogContainer.querySelector('#dialog-slider-value');
+            
+            slider.addEventListener('input', () => {
+                valueDisplay.textContent = slider.value;
+            });
+            
+            const closeWithResult = (value) => {
+                this.dialogOverlay.style.display = 'none';
+                this.dialogContainer.innerHTML = '';
+                if (this.options.onDialogClose) {
+                    this.options.onDialogClose();
+                }
+                resolve(value);
+            };
+            
+            this.dialogContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('button');
+                if (btn) {
+                    if (btn.dataset.action === 'ok') {
+                        closeWithResult(slider.value);
+                    } else {
+                        closeWithResult(null);
+                    }
+                }
+            });
+            
+            slider.focus();
+        });
+    }
+    
+    /**
+     * Show a date picker dialog
+     * @param {Object} field - Field data with label/name
+     * @param {string} currentValue - Current date value (YYYYMMDD format)
+     * @returns {Promise<string|null>} Selected date in YYYYMMDD format or null if cancelled
+     */
+    async showDateDialog(field, currentValue = '') {
+        console.log('[DialogHandler] Showing date dialog:', field.name);
+        
+        const title = field.label || field.name || 'Select Date';
+        
+        // Parse current value (YYYYMMDD) to HTML date format (YYYY-MM-DD)
+        let htmlDateValue = '';
+        if (currentValue && currentValue.length === 8) {
+            htmlDateValue = `${currentValue.substr(0, 4)}-${currentValue.substr(4, 2)}-${currentValue.substr(6, 2)}`;
+        } else if (currentValue && currentValue.includes('-')) {
+            htmlDateValue = currentValue;
+        }
+        
+        return new Promise((resolve) => {
+            const dialogHtml = `
+                <div class="dialog-date">
+                    <div class="dialog-date-title">${escapeHtml(title)}</div>
+                    <div class="dialog-date-container" style="margin: 20px 0;">
+                        <input type="date" id="dialog-date-input" value="${htmlDateValue}"
+                               style="font-size: 16px; padding: 8px; width: 100%; box-sizing: border-box;">
+                    </div>
+                    <div class="dialog-date-buttons" style="margin-top: 20px; text-align: right;">
+                        <button type="button" data-action="cancel" style="margin-right: 10px;">Cancel</button>
+                        <button type="button" data-action="ok" class="default-button">OK</button>
+                    </div>
+                </div>
+            `;
+            
+            this.dialogContainer.innerHTML = dialogHtml;
+            this.dialogOverlay.style.display = 'block';
+            
+            const dateInput = this.dialogContainer.querySelector('#dialog-date-input');
+            
+            const closeWithResult = (value) => {
+                this.dialogOverlay.style.display = 'none';
+                this.dialogContainer.innerHTML = '';
+                if (this.options.onDialogClose) {
+                    this.options.onDialogClose();
+                }
+                resolve(value);
+            };
+            
+            this.dialogContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('button');
+                if (btn) {
+                    if (btn.dataset.action === 'ok' && dateInput.value) {
+                        // Convert HTML date (YYYY-MM-DD) back to CSPro format (YYYYMMDD)
+                        const csproDate = dateInput.value.replace(/-/g, '');
+                        closeWithResult(csproDate);
+                    } else if (btn.dataset.action === 'cancel') {
+                        closeWithResult(null);
+                    }
+                }
+            });
+            
+            dateInput.focus();
+        });
+    }
+    
+    /**
      * Show a simple message dialog
      * @param {Object} inputData - Dialog input data
      * @returns {Promise<string>} JSON result string
      */
     showSimpleMessageDialog(inputData) {
         return new Promise((resolve) => {
-            const { message, title, buttons, defaultButtonIndex } = inputData;
+            let { message, title, buttons, defaultButtonIndex } = inputData;
+            
+            // Extract message number from message if it's in "0020: Message text" format
+            let messageNumber = null;
+            if (message && typeof message === 'string') {
+                const match = message.match(/^(\d{4}):\s*/);
+                if (match) {
+                    messageNumber = match[1];
+                    message = message.substring(match[0].length);
+                }
+            }
             
             let buttonsHtml = '';
             if (buttons && buttons.length > 0) {
@@ -273,7 +452,7 @@ export class DialogHandler {
             const dialogHtml = `
                 <div class="dialog-message">
                     ${title ? `<div class="dialog-message-title">${escapeHtml(title)}</div>` : ''}
-                    <div class="dialog-message-text">${escapeHtml(message || '')}</div>
+                    <div class="dialog-message-text">${messageNumber ? `<strong>${escapeHtml(messageNumber)}:</strong> ` : ''}${escapeHtml(message || '')}</div>
                     <div class="dialog-message-buttons">${buttonsHtml}</div>
                 </div>
             `;
@@ -312,8 +491,17 @@ export class DialogHandler {
      */
     async _showNativeDialog(dialogName, inputData) {
         console.log('[DialogHandler] _showNativeDialog:', dialogName, inputData);
+        
+        // Map special dialog names to generic templates
+        let templateName = dialogName;
+        if (dialogName === 'OperatorID') {
+            templateName = 'text-input';
+            // Ensure input data has correct structure for text-input
+            if (!inputData.title) inputData.title = 'Operator ID';
+        }
+        
         // Use absolute path from web root
-        const dialogPath = `/dialogs/${dialogName}.html`;
+        const dialogPath = `/dialogs/${templateName}.html`;
         return await this._showIframeDialog(dialogPath, inputData);
     }
     
@@ -407,10 +595,13 @@ export class DialogHandler {
                     // Extract the actual result - WASM expects { index: N } directly
                     // Dialog HTML sends { result: { index: N } }, so we need to unwrap it
                     let result = event.data.result || { index: 1 };
-                    if (result.result && typeof result.result.index !== 'undefined') {
-                        // Unwrap nested result
+                    
+                    // Unwrap nested result object if present
+                    // The action invoker typically wraps the return value in a 'result' property
+                    if (result && typeof result === 'object' && result.result) {
                         result = result.result;
                     }
+                    
                     resolve(JSON.stringify(result));
                 } else if (event.data.type === 'cspro-dialog-resize') {
                     const { width, height } = event.data;

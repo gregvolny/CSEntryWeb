@@ -4,6 +4,88 @@
  */
 
 /**
+ * Build MFC-style case tree with case list
+ * Shows: File folder > existing cases > current case being added/modified
+ * @param {HTMLElement} treeContainer - Container for tree elements
+ * @param {Object} currentApp - Application with forms
+ * @param {Array} cases - Array of existing case info objects
+ * @param {Object} options - Options
+ * @param {boolean} options.isAddingCase - True if currently adding a new case
+ * @param {boolean} options.isModifyingCase - True if currently modifying a case
+ * @param {number} options.currentCaseIndex - Index of case being modified (-1 for new)
+ * @param {Function} options.onCaseClick - Callback when case is clicked
+ * @param {Function} options.onFieldClick - Callback when field is clicked
+ */
+export function buildCaseListTree(treeContainer, currentApp, cases = [], options = {}) {
+    const {
+        isAddingCase = false,
+        isModifyingCase = false,
+        currentCaseIndex = -1,
+        onCaseClick = null,
+        onFieldClick = null
+    } = options;
+    
+    treeContainer.innerHTML = '';
+    
+    // Create tree root
+    const root = document.createElement('div');
+    root.className = 'case-tree-root';
+    
+    // Create "File" folder node (MFC style)
+    const fileNode = createTreeNode('File', 'folder', true);
+    fileNode.dataset.expanded = 'true';
+    root.appendChild(fileNode);
+    
+    // Container for case items
+    const casesContainer = document.createElement('div');
+    casesContainer.className = 'tree-children';
+    
+    // Add existing cases
+    if (cases && cases.length > 0) {
+        cases.forEach((caseInfo, index) => {
+            const caseLabel = caseInfo.label || caseInfo.key || `Case ${index + 1}`;
+            const isCurrentCase = isModifyingCase && index === currentCaseIndex;
+            
+            const caseNode = createTreeNode(caseLabel, 'case', false);
+            caseNode.dataset.caseIndex = index;
+            caseNode.dataset.casePosition = caseInfo.position;
+            
+            // Highlight current case being modified
+            if (isCurrentCase) {
+                caseNode.classList.add('current-case');
+            }
+            
+            // Click handler
+            if (onCaseClick) {
+                caseNode.querySelector('.tree-label').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    onCaseClick(index, caseInfo.position);
+                });
+            }
+            
+            casesContainer.appendChild(caseNode);
+        });
+    }
+    
+    // Add "Adding Case" node if currently adding
+    if (isAddingCase) {
+        const addingNode = createTreeNode('<Adding Case>', 'adding-case', false);
+        addingNode.classList.add('adding-case-node');
+        
+        // Add checkbox icon
+        const checkbox = document.createElement('span');
+        checkbox.className = 'tree-checkbox';
+        checkbox.innerHTML = '☐';
+        addingNode.querySelector('.tree-label').prepend(checkbox);
+        
+        casesContainer.appendChild(addingNode);
+    }
+    
+    fileNode.appendChild(casesContainer);
+    treeContainer.appendChild(root);
+}
+
+/**
  * Build case tree structure from forms
  * @param {HTMLElement} treeContainer - Container for tree elements
  * @param {Object} currentApp - Application with forms
@@ -97,7 +179,7 @@ export function buildCaseTree(treeContainer, currentApp, navigationFields = [], 
  */
 export function createTreeNode(label, type = 'item', expanded = false) {
     const node = document.createElement('div');
-    node.className = `tree-node tree-${type}`;
+    node.className = `tree-node tree-${type}${expanded ? ' expanded' : ''}`;
     node.dataset.type = type;
     node.dataset.expanded = expanded;
     
@@ -119,6 +201,12 @@ export function createTreeNode(label, type = 'item', expanded = false) {
             break;
         case 'field':
             icon.textContent = '▪';
+            break;
+        case 'case':
+            icon.textContent = '📝';
+            break;
+        case 'adding-case':
+            icon.textContent = '';  // Will use checkbox instead
             break;
         default:
             icon.textContent = '•';

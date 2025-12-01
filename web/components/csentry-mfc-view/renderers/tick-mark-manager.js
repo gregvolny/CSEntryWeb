@@ -448,17 +448,23 @@ export function shouldShowTickMarks(field) {
         return true;
     }
     
-    // ALPHA FIELDS: No tick marks for TextBox capture type (UseUnicodeTextBox = true)
-    // TextBox capture type is the default for alpha text input fields
-    const captureType = field.captureType || field.capture?.type || 'TextBox';
-    
-    // UseUnicodeTextBox = Alpha + TextBox => no tick marks
-    if (captureType === 'TextBox' || captureType === 0) {
+    // ALPHA FIELDS: Check server-provided tickmarks property first
+    // The server serializes tickmarks = !UseUnicodeTextBox() for alpha fields
+    if (field.tickmarks === false) {
         return false;
     }
     
-    // Skip for Arabic fonts (GetFont().IsArabic() in MFC)
+    // Check for Arabic fonts (GetFont().IsArabic() in MFC) - check BEFORE capture type
     if (field.isArabic || field.rtl) {
+        return false;
+    }
+    
+    // Check capture type - TextBox capture type = UseUnicodeTextBox = no tick marks
+    // NOTE: Use ?? (nullish coalescing) not || because 0 (TextBox) is a valid value
+    const captureType = field.captureType ?? field.capture?.type ?? 0;
+    
+    // Alpha + TextBox (capture type 0) = UseUnicodeTextBox = true => NO tick marks
+    if (captureType === 0 || captureType === 'TextBox') {
         return false;
     }
     

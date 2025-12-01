@@ -5,21 +5,8 @@
 
     <link rel="stylesheet" href="/css/dialogs.css">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
-    <script>
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
-        
-        if (isWebMode) {
-            console.log('[Image-captureSignature] Running in web mode');
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            console.log('[Image-captureSignature] Running in native mode, loading action-invoker.js');
-            document.write('<script src="/action-invoker.js"><\/script>');
-        }
-    </script>
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
 
     <title>CSPro Signature Capture</title>
 </head>
@@ -33,10 +20,11 @@
         const message = document.getElementById("message");
         const signature = document.getElementById("signature");
         
-        // Initialize CS based on mode
-        let CS;
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            CS = new CSProActionInvoker('');
+        // Create global CS instance - unified action-invoker handles environment detection
+        const CS = new CSProActionInvoker('');
+        
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
             window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
             console.log('[Image-captureSignature] Sent cspro-dialog-ready to parent');
             
@@ -47,11 +35,10 @@
             });
             
             // Check if already initialized
-            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+            if (typeof CSProActionInvokerWebState !== 'undefined' && CSProActionInvokerWebState.initialized) {
                 initializeSignatureDialog();
             }
         } else {
-            CS = new CSProActionInvoker("39169c42dbb624374c502936637c36b6");
             // Native mode - initialize immediately
             initializeSignatureDialog();
         }

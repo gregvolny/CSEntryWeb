@@ -82,7 +82,6 @@ export function createMenuBar() {
                     </div>
                     <div class="menu-dropdown-item" data-action="stop">
                         <span class="menu-text">Stop</span>
-                        <span class="menu-shortcut">Ctrl+S</span>
                     </div>
                 </div>
             </div>
@@ -282,9 +281,14 @@ export function createToolbar() {
 export function createMainArea() {
     return `
         <div class="mfc-main">
-            <!-- Left Panel - Case Tree (CTreeCtrl in MFC) -->
+            <!-- Left Panel - Case List or Case Tree -->
             <div class="mfc-tree-panel" id="treePanel">
-                <div class="panel-header">Cases</div>
+                <div class="panel-header" id="leftPanelHeader">Cases</div>
+                <!-- Case List View (shown when no case is open) -->
+                <div class="case-list-view" id="caseListView" style="display: none;">
+                    <div class="case-list-loading">Loading cases...</div>
+                </div>
+                <!-- Case Tree View (shown when a case is open) -->
                 <div class="tree-content" id="treeContent"></div>
             </div>
             
@@ -330,10 +334,6 @@ export function createWelcomeScreen() {
                 </div>
                 <h2 class="welcome-title">CSEntry Web</h2>
                 <p class="welcome-subtitle">Load a CSPro application to begin data entry.</p>
-                
-                <button class="btn btn-primary welcome-load-btn" data-action="open">
-                    Load Application
-                </button>
                 
                 <div class="welcome-sources">
                     <p class="sources-label">Load From:</p>

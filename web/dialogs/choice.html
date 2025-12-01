@@ -10,28 +10,14 @@
     <link rel="stylesheet" href="/external/bootstrap/bootstrap-icons.css">
     <link rel="stylesheet" href="/css/dialogs.css">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
     <script>
-        // Detect web mode from URL parameter or iframe context
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        // Create global CS instance - unified action-invoker handles environment detection
+        window.CS = new CSProActionInvoker('');
         
-        if (isWebMode) {
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            // Native mode - load native action invoker
-            document.write('<script src="/action-invoker.js"><\/script>');
-        }
-    </script>
-    <script>
-        // After action invoker is loaded, initialize for web mode
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            // Create global CS instance using web action invoker
-            window.CS = new CSProActionInvoker('');
-            
-            // Signal ready to parent
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
             window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
         }
     </script>
@@ -70,6 +56,19 @@
                 <div class="btn-close my-close-button" aria-label="Close" onclick="CS.UI.closeDialog();">
                 </div>
             </div>
+            {{#allowDirectInput}}
+            <div class="row" style="padding:8px 12px 4px 12px;margin:0;">
+                <div class="col-12" style="padding:0;">
+                    <div id="directInputContainer" style="position: relative; display: inline-block; margin: 0 auto;">
+                        <canvas id="directInputCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; background: #ffffff;"></canvas>
+                        <input type="text" id="directInput" 
+                               style="font-family: Consolas, 'Courier New', monospace; font-size: 12px; position: relative; z-index: 2; background: transparent; border: 1px solid #808080; padding: 2px; box-sizing: border-box; height: 22px; color: #000000;" 
+                               autofocus>
+                    </div>
+                </div>
+            </div>
+            {{/allowDirectInput}}
+            {{^allowDirectInput}}
             <div id="mBody" class="row my-dialog-body" style="overflow-y:auto;margin-top:0;margin-bottom:0;padding-top:0;padding-bottom:0;">
                 <div class="col-12">
                     <div class="list-group my-input" id="list-tab" role="tablist">
@@ -79,6 +78,7 @@
                     </div>
                 </div>
             </div>
+            {{/allowDirectInput}}
             <div id="mFooter" class="row text-center my-dialog-footer">
                 <div class="col my-dialog-button-col">
                     <button class="btn btn-light col-12 text-center" id="okButton" type="button" onclick="dialogReturn(selectedIndex);" tabindex="-1">
@@ -117,6 +117,8 @@
         }
 
         function buildDialog(input) {
+            console.log('[choice.html] Building dialog with input:', input);
+            console.log('[choice.html] allowDirectInput:', input.allowDirectInput);
             var template = $("#choiceTemplate").html();
             $("#dialogDynamicContainer").html(Mustache.render(template, input));
         }
@@ -135,7 +137,15 @@
         }
 
         function dialogReturn(idx) {
-            CS.UI.closeDialog({ result: { index: idx } });
+            // Check if we have direct input value
+            var directInputElem = document.getElementById('directInput');
+            if (directInputElem && directInputElem.value.trim() !== '') {
+                // Return direct input value
+                CS.UI.closeDialog({ result: { value: directInputElem.value.trim() } });
+            } else {
+                // Return selected index
+                CS.UI.closeDialog({ result: { index: idx } });
+            }
         }
 
         function replaceNewline() {
@@ -258,10 +268,21 @@
                 isShift = !!ev.shiftKey;
             }
 
+            // Handle Enter key in direct input field
+            if (e.keyCode === 13 && document.activeElement && document.activeElement.id === 'directInput') {
+                dialogReturn(-1); // -1 indicates we're using direct input value
+                e.preventDefault();
+                return;
+            }
+
             if (e.keyCode === 27) { //ESC
                 CS.UI.closeDialog();
             }
             else if (e.keyCode === 39 || e.keyCode === 40) { //down arrow, right arrow
+                // Skip list navigation if focused on direct input
+                if (document.activeElement && document.activeElement.id === 'directInput') {
+                    return;
+                }
                 focusedIndex++;
                 if (focusedIndex > input.choices[input.choices.length - 1].index) {
                     focusedIndex = input.choices[0].index;
@@ -271,6 +292,10 @@
                 e.preventDefault();
             }
             else if (e.keyCode === 37 || e.keyCode === 38) { //up arrow, left arrow
+                // Skip list navigation if focused on direct input
+                if (document.activeElement && document.activeElement.id === 'directInput') {
+                    return;
+                }
                 focusedIndex--;
                 if (focusedIndex < input.choices[0].index) {
                     focusedIndex = input.choices[input.choices.length - 1].index;
@@ -292,6 +317,54 @@
     <div id="dialogDynamicContainer" style="position:fixed;top:0;"></div>
 
     <script>
+        // Draw tick marks on canvas (matches MFC GridWnd.cpp tick mark logic)
+        function drawTickMarks(canvas, length, options = {}) {
+            const decimalPlaces = options.decimalPlaces || 0;
+            const ctx = canvas.getContext('2d');
+            const charWidth = 7.2; // Consolas monospace width at 12px
+            const canvasHeight = 22;
+            
+            // Account for left border (1px) and padding (2px)
+            const iLeft = 3;
+            
+            // Total width includes field length * charWidth + left offset
+            canvas.width = iLeft + (length * charWidth) + 4;
+            canvas.height = canvasHeight;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Tick marks are drawn BETWEEN characters (length - 1 marks)
+            // Per MFC logic: DrawLine(x, rcFld.bottom - 1, x, rcFld.bottom - iHeight/4);
+            const iBottom = canvasHeight - 1;
+            const iHeight = canvasHeight - 2;
+            let tickHeight = Math.floor(iHeight / 4);
+            if (tickHeight < 3) tickHeight = 3;
+            if (tickHeight > 6) tickHeight = 6;
+            const tickTop = iBottom - tickHeight;
+            
+            // Draw tick marks between character positions
+            for (let i = 0; i < length - 1; i++) {
+                // MFC formula: x = rcFld.left + 1 + (iIndex + 1) * (m_pDoc->GetCharWidth())
+                const x = iLeft + (i + 1) * charWidth;
+                
+                // Highlight decimal position with different color (red) and thicker line
+                const isDecimalPosition = decimalPlaces > 0 && i === length - decimalPlaces - 1;
+                
+                if (isDecimalPosition) {
+                    ctx.strokeStyle = '#FF0000';  // Red for decimal position
+                    ctx.lineWidth = 2;
+                } else {
+                    ctx.strokeStyle = '#808080';  // Gray for regular tick marks
+                    ctx.lineWidth = 1;
+                }
+                
+                ctx.beginPath();
+                ctx.moveTo(Math.floor(x) + 0.5, iBottom);
+                ctx.lineTo(Math.floor(x) + 0.5, tickTop);
+                ctx.stroke();
+            }
+        }
+
         // Initialize dialog function
         function initializeChoiceDialog(inputData) {
             window.input = inputData;
@@ -318,17 +391,66 @@
             }
 
             $("#mWidth").hide();
+            
+            // Setup direct input field if present
+            if (input.allowDirectInput) {
+                const directInput = document.getElementById('directInput');
+                const canvas = document.getElementById('directInputCanvas');
+                const container = document.getElementById('directInputContainer');
+                
+                console.log('[choice.html] Setting up direct input, fieldLength:', input.fieldLength, 'decimalPlaces:', input.decimalPlaces);
+                
+                if (directInput && canvas && container) {
+                    const fieldLength = input.fieldLength || 3;
+                    const decimalPlaces = input.decimalPlaces || 0;
+                    const charWidth = 7.2;
+                    const iLeft = 3; // Left border + padding
+                    
+                    // Set maxLength including decimal point
+                    directInput.maxLength = fieldLength + (decimalPlaces > 0 ? 1 : 0);
+                    
+                    // Calculate width: left offset + (fieldLength * charWidth) + right padding
+                    const inputWidth = iLeft + (fieldLength * charWidth) + 4;
+                    directInput.style.width = inputWidth + 'px';
+                    container.style.width = inputWidth + 'px';
+                    canvas.style.width = inputWidth + 'px';
+                    
+                    // Set font and padding to match MFC field rendering
+                    directInput.style.font = '12px Consolas, monospace';
+                    directInput.style.paddingLeft = iLeft + 'px';
+                    directInput.style.paddingRight = '2px';
+                    
+                    console.log('[choice.html] Input width set to:', inputWidth + 'px');
+                    
+                    // Draw tick marks if numeric
+                    if (input.showTickMarks) {
+                        console.log('[choice.html] Drawing tick marks');
+                        drawTickMarks(canvas, fieldLength, { decimalPlaces });
+                    }
+                    
+                    // Set default value if provided
+                    if (input.currentValue !== undefined && input.currentValue !== null && input.currentValue !== '') {
+                        directInput.value = input.currentValue;
+                    }
+                } else {
+                    console.error('[choice.html] Could not find elements:', {
+                        directInput: !!directInput,
+                        canvas: !!canvas,
+                        container: !!container
+                    });
+                }
+            }
         }
         
-        // Initialize based on mode
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
+        // Initialize based on mode - use CSProEnvironment.isWebMode() from unified action-invoker.js
+        if (typeof CSProEnvironment !== 'undefined' && CSProEnvironment.isWebMode()) {
             // Web mode - wait for data from parent via cspro-input-ready event
             window.addEventListener('cspro-input-ready', function(event) {
                 var input = event.detail?.inputData || CS.UI.getInputData() || {};
                 initializeChoiceDialog(input);
             });
             // Also check if already initialized
-            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+            if (typeof CSProActionInvokerWebState !== 'undefined' && CSProActionInvokerWebState.initialized) {
                 initializeChoiceDialog(CS.UI.getInputData() || {});
             }
         } else {

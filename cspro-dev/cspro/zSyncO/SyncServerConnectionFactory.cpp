@@ -17,6 +17,10 @@
 #include <zNetwork/CurlHttpConnection.h>
 #endif
 
+#ifdef WASM
+#include <zNetwork/WasmHttpConnection.h>
+#endif
+
 
 namespace {
 
@@ -43,7 +47,9 @@ std::shared_ptr<IHttpConnection> createHttpConnection()
 #elif defined(WIN_DESKTOP)
     return std::make_shared<CurlHttpConnection>();
 #elif defined(WASM)
-    throw CSProException("WASM_TODO -- Not implemented: createHttpConnection");
+    // Return a stub connection that returns 503 for all requests
+    // This allows sync operations to fail gracefully rather than crash
+    return std::make_shared<WasmHttpConnection>();
 #else
     throw CSProException("Not implemented: createHttpConnection");
 #endif

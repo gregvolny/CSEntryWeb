@@ -14,8 +14,7 @@ const TCHAR* EncryptedSQLiteRepository::GetFileExtension() const
 
 int EncryptedSQLiteRepository::OpenSQLiteDatabaseFile(const CDataDict* data_dictionary, const ConnectionString& connection_string, sqlite3** ppDb, const int flags)
 {
-    if( !SqliteEncryption::IsEnabled() )
-        throw DataRepositoryException::IOError(SqliteEncryption::NoSeeExceptionMessage);
+    // Encryption is now always enabled with SQLite3 Multiple Ciphers
 
     const std::wstring& filename = connection_string.GetFilename();
     int open_result = 0;

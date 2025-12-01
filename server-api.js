@@ -21,6 +21,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3002;
+const HOST = process.env.HOST || '0.0.0.0';  // Listen on all interfaces by default
 
 // Check if JSPI is available (requires --experimental-wasm-jspi flag)
 let jspiAvailable = false;
@@ -35,7 +36,8 @@ console.log(`[Server] JSPI available: ${jspiAvailable}`);
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));  // Large limit for application files
+app.use(express.json({ limit: '200mb' }));  // Large limit for application files
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
 // CORS headers for WASM
 app.use((req, res, next) => {
@@ -53,12 +55,19 @@ app.use((req, res, next) => {
 // Static file serving with proper MIME types
 app.use(express.static(path.join(__dirname, 'web'), {
     setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.js')) {
+        // Add CORP header for all resources to work with COEP
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        
+        if (filePath.endsWith('.html')) {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        } else if (filePath.endsWith('.js')) {
             res.setHeader('Content-Type', 'application/javascript');
         } else if (filePath.endsWith('.wasm')) {
             res.setHeader('Content-Type', 'application/wasm');
         } else if (filePath.endsWith('.data')) {
             res.setHeader('Content-Type', 'application/octet-stream');
+        } else if (filePath.endsWith('.css')) {
+            res.setHeader('Content-Type', 'text/css; charset=utf-8');
         }
     }
 }));
@@ -365,13 +374,12 @@ app.post('/api/applications/upload', upload.array('files'), (req, res) => {
         // Save files
         for (const file of req.files) {
             // Get relative path from original filename
-            const relativePath = file.originalname;
+            // Normalize path separators to forward slashes for consistent handling
+            const relativePath = file.originalname.replace(/\\/g, '/');
             
-            // Remove the first folder (which is the original folder name)
-            const pathParts = relativePath.split('/');
-            const filePath = pathParts.length > 1 
-                ? pathParts.slice(1).join('/')
-                : relativePath;
+            // Use the full relative path provided by the client
+            // This preserves the folder structure exactly as uploaded, including the root folder
+            const filePath = relativePath;
             
             const fullPath = path.join(appDir, filePath);
             const dirPath = path.dirname(fullPath);
@@ -542,12 +550,12 @@ app.use((req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, HOST, () => {
     console.log('');
     console.log('╔════════════════════════════════════════════════════════════╗');
     console.log('║           CSPro Web Server with REST API                   ║');
     console.log('╠════════════════════════════════════════════════════════════╣');
-    console.log(`║  Server running at: http://localhost:${PORT}                  ║`);
+    console.log(`║  Server running at: http://${HOST}:${PORT}                  ║`);
     console.log(`║  JSPI Support:      ${jspiAvailable ? 'ENABLED ' : 'DISABLED'}                            ║`);
     console.log('╠════════════════════════════════════════════════════════════╣');
     console.log('║  Endpoints:                                                ║');

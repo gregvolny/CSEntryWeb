@@ -20,6 +20,7 @@
 #include <zFormO/Roster.h>
 #include <zFormO/RosterColumn.h>
 #include <zFormO/Text.h>
+#include <zFormO/Box.h>
 #include <zFormO/FieldColors.h>
 #include <zDictO/CaptureInfo.h>
 #include <zDictO/ValueSetResponse.h>
@@ -225,6 +226,33 @@ public:
             return false;
         }
     }
+
+    val getSequentialCaseIds()
+    {
+        if (!m_engine) return val::null();
+        
+        try {
+            auto cases = m_engine->GetSequentialCaseIds();
+            val result = val::array();
+            
+            for (const auto& c : cases) {
+                val caseObj = val::object();
+                caseObj.set("ids", CStringToStdString(c.case_summary.GetKey()));
+                caseObj.set("label", CStringToStdString(c.case_summary.GetCaseLabel()));
+                caseObj.set("position", c.case_summary.GetPositionInRepository());
+                result.call<void>("push", caseObj);
+            }
+            return result;
+        } catch (...) {
+            return val::null();
+        }
+    }
+
+    bool modifyCase(double position)
+    {
+        if (!m_engine) return false;
+        return m_engine->ModifyCase(position);
+    }
     
     val getCurrentPage()
     {
@@ -359,6 +387,22 @@ public:
                 fieldObj.set("isUpperCase", field.IsUpperCase());
                 fieldObj.set("isMultiline", field.IsMultiline());
                 fieldObj.set("alphaValue", CStringToStdString(field.GetAlphaValue()));
+            }
+            
+            // Tick mark properties from MFC CDEField
+            // From GridWnd.cpp: UseUnicodeTextBox() || (Alpha && GetFont().IsArabic()) => NO tick marks
+            CDEField* pDEField = field.GetField();
+            if (pDEField) {
+                bool useUnicodeTextBox = pDEField->UseUnicodeTextBox();
+                bool isArabicFont = pDEField->GetFont().IsArabic();
+                fieldObj.set("useUnicodeTextBox", useUnicodeTextBox);
+                fieldObj.set("isArabic", isArabicFont);
+                // Compute tickmarks = !UseUnicodeTextBox && !IsArabic (for alpha), always true for numeric
+                bool showTickmarks = isNumeric || (!useUnicodeTextBox && !isArabicFont);
+                fieldObj.set("tickmarks", showTickmarks);
+                printf("[WASM] getCurrentPage(): field %s tickmarks: useUnicodeTextBox=%d isArabic=%d showTickmarks=%d\n",
+                       CStringToStdString(field.GetName()).c_str(), useUnicodeTextBox, isArabicFont, showTickmarks);
+                fflush(stdout);
             }
             
             // Slider properties (if applicable)
@@ -778,9 +822,26 @@ public:
                     }
                 }
                 
+                // Get boxes from the form's box set
+                val boxesArray = val::array();
+                const CDEBoxSet& boxSet = pForm->GetBoxSet();
+                size_t numBoxes = boxSet.GetNumBoxes();
+                printf("[WASM] Form '%s' has %zu boxes\n", UTF8Convert::WideToUTF8(pForm->GetLabel()).c_str(), numBoxes);
+                for (size_t boxIdx = 0; boxIdx < numBoxes; ++boxIdx)
+                {
+                    const CDEBox& box = boxSet.GetBox(boxIdx);
+                    const CRect& dims = box.GetDims();
+                    printf("[WASM] Box %zu: type=%d, x=%d, y=%d, w=%d, h=%d\n", 
+                           boxIdx, static_cast<int>(box.GetBoxType()), 
+                           dims.left, dims.top, dims.Width(), dims.Height());
+                    val boxObj = convertBox(box);
+                    boxesArray.call<void>("push", boxObj);
+                }
+                
                 formObj.set("fields", fieldsArray);
                 formObj.set("rosters", rostersArray);
                 formObj.set("texts", textsArray);
+                formObj.set("boxes", boxesArray);
                 
                 formsArray.call<void>("push", formObj);
             }
@@ -982,26 +1043,30 @@ private:
             fieldObj.set("zeroFill", pDictItem->GetZeroFill());
             fieldObj.set("decimalChar", pDictItem->GetDecChar());
             
-            // Capture type from dictionary item
-            CaptureInfo captureInfo = pDictItem->GetCaptureInfo();
-            std::string captureType = "TextBox";
-            if (captureInfo.IsSpecified())
+            // Get evaluated capture type from FORM field (matches MFC behavior)
+            // CDEField::GetEvaluatedCaptureInfo() checks form-level capture type first (m_captureInfo),
+            // then falls back to dictionary capture type if form doesn't specify.
+            // This is how CSEntry MFC works - form capture types are primary (from .ent file).
+            // Send as integer (matching getCurrentPage behavior) for consistency
+            CaptureInfo captureInfo = pField->GetEvaluatedCaptureInfo();
+            int captureTypeInt = 0; // Default to TextBox
+            std::string fieldName = CStringToStdString(pDictItem->GetName());
+            bool isSpecified = captureInfo.IsSpecified();
+            
+            printf("[WASM] convertField: %s captureInfo.IsSpecified=%d\n", fieldName.c_str(), isSpecified);
+            
+            if (isSpecified)
             {
-                switch (captureInfo.GetCaptureType())
-                {
-                    case CaptureType::RadioButton: captureType = "RadioButton"; break;
-                    case CaptureType::CheckBox: captureType = "CheckBox"; break;
-                    case CaptureType::DropDown: captureType = "DropDown"; break;
-                    case CaptureType::ComboBox: captureType = "ComboBox"; break;
-                    case CaptureType::Date: captureType = "Date"; break;
-                    case CaptureType::NumberPad: captureType = "NumberPad"; break;
-                    case CaptureType::Barcode: captureType = "Barcode"; break;
-                    case CaptureType::Slider: captureType = "Slider"; break;
-                    case CaptureType::ToggleButton: captureType = "ToggleButton"; break;
-                    default: captureType = "TextBox"; break;
-                }
+                captureTypeInt = static_cast<int>(captureInfo.GetCaptureType());
+                printf("[WASM] convertField: %s rawCaptureType=%d\n", fieldName.c_str(), captureTypeInt);
             }
-            fieldObj.set("captureType", captureType);
+            else
+            {
+                printf("[WASM] convertField: %s captureInfo NOT specified, defaulting to TextBox (0)\n", fieldName.c_str());
+            }
+            
+            printf("[WASM] convertField: %s final captureType=%d\n", fieldName.c_str(), captureTypeInt);
+            fieldObj.set("captureType", captureTypeInt);
             
             // Get responses from the first value set in the dictionary item
             // This provides static responses for roster fields that need them for UI rendering
@@ -1169,6 +1234,35 @@ private:
         textObj.set("color", static_cast<int>(pText->GetColor().ToCOLORREF()));
         
         return textObj;
+    }
+    
+    // Helper to convert a CDEBox to JavaScript object
+    val convertBox(const CDEBox& box)
+    {
+        val boxObj = val::object();
+        
+        // Position and dimensions
+        const CRect& dims = box.GetDims();
+        boxObj.set("x", dims.left);
+        boxObj.set("y", dims.top);
+        boxObj.set("width", dims.Width());
+        boxObj.set("height", dims.Height());
+        
+        // Box type: Etched=1, Raised=2, Thin=3, Thick=4
+        boxObj.set("boxType", static_cast<int>(box.GetBoxType()));
+        
+        // Also provide type as string for frontend convenience
+        const char* typeStr = "etched";
+        switch (box.GetBoxType())
+        {
+            case BoxType::Etched: typeStr = "etched"; break;
+            case BoxType::Raised: typeStr = "raised"; break;
+            case BoxType::Thin: typeStr = "thin"; break;
+            case BoxType::Thick: typeStr = "thick"; break;
+        }
+        boxObj.set("boxTypeStr", typeStr);
+        
+        return boxObj;
     }
     
     val convertCaseTreeNode(const CaseTreeNode* node)
@@ -1530,6 +1624,8 @@ EMSCRIPTEN_BINDINGS(cspro_engine)
         // Methods that may suspend (file I/O operations) - marked with async() for JSPI
         .function("initApplication", &CSProEngine::initApplication, async())
         .function("start", &CSProEngine::start, async())
+        .function("getSequentialCaseIds", &CSProEngine::getSequentialCaseIds)
+        .function("modifyCase", &CSProEngine::modifyCase, async())
         .function("nextField", &CSProEngine::nextField, async())
         .function("previousField", &CSProEngine::previousField, async())
         .function("goToField", &CSProEngine::goToField, async())

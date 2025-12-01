@@ -90,7 +90,8 @@ target_link_options(${PROJECT_NAME} PUBLIC -sJSPI)
 # Export FS for file system operations from JavaScript
 target_link_options(${PROJECT_NAME} PUBLIC -sEXPORTED_RUNTIME_METHODS=['FS','ccall','cwrap'])
 
-# bundle the assets
+# Reduce optimization to prevent dead code elimination
+target_link_options(${PROJECT_NAME} PUBLIC "SHELL:-O1")# bundle the assets
 target_link_options(${PROJECT_NAME} PUBLIC --preload-file ${CMAKE_CURRENT_SOURCE_DIR}/Assets@Assets/)
 
 

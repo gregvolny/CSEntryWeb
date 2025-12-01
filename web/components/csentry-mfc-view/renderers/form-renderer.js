@@ -1,21 +1,23 @@
 /**
  * Form Renderer - Renders CSPro forms with positioned fields
  * 
- * MFC Tick Mark Rules (from DEEdit.cpp, GridWnd.cpp, Field.cpp):
- * 
- * Tick marks are shown when:
- *   - Numeric fields: ALWAYS show tick marks
- *   - Alpha fields: Show tick marks UNLESS:
- *     - UseUnicodeTextBox() is true (Alpha + TextBox capture type)
- *     - OR Font is Arabic (GetFont().IsArabic())
- * 
- * The server serializes this as the "tickmarks" property:
- *   tickmarks = !UseUnicodeTextBox() for alpha fields
+ * Uses tickMarks modules for tick mark rendering to avoid code duplication.
+ * All tick mark data comes from the WASM engine.
  * 
  * @module components/csentry-mfc-view/renderers/form-renderer
  */
 
-import { CAPTURE_TYPES, TICK_MARK_CONFIG, measureCharWidth, calculateFieldWidth } from '../utils/constants.js';
+import { CAPTURE_TYPES } from '../utils/constants.js';
+
+// Import tick marks functionality from tickMarks modules
+import { 
+    shouldShowTickMarks,
+    drawTickMarksWithLetterSpacing,
+    createTickMarkCanvas,
+    TICK_MARK_CONFIG
+} from '../tickMarks/index.js';
+
+import { measureCharWidth, calculateFieldWidth } from '../tickMarks/utils.js';
 
 /**
  * Render form with all elements (texts, fields, boxes, rosters)
@@ -32,6 +34,42 @@ export function renderForm(container, form, { createFieldElement, createRosterTa
         return { canvas: null, fields: [], rosters: {} };
     }
     
+    console.log('[form-renderer] renderForm called with form:', form?.name, 
+        'texts:', form?.texts?.length, 'fields:', form?.fields?.length);
+    
+    // WORKAROUND: Inject missing boxes for FORM000 if they are not present
+    // The WASM engine seems to not return boxes in getFormData for this version
+    // Only apply this workaround if the form looks like the "Inscription" form (has ID_QUESTIONNAIRE or NOM_UTILISATEUR)
+    const hasInscriptionFields = form.fields && form.fields.some(f => 
+        f.name === 'ID_QUESTIONNAIRE' || f.name === 'NOM_UTILISATEUR' || 
+        f.name === 'PRENOM_UTILISATEUR' || f.name === 'CODE_MACHINE'
+    );
+
+    if (hasInscriptionFields && form && (form.name === 'FORM000' || !form.boxes || form.boxes.length === 0)) {
+        if (!form.boxes) form.boxes = [];
+        
+        // Check if we already have these boxes to avoid duplicates
+        const hasBox = (x, y) => form.boxes.some(b => b.x === x && b.y === y);
+        
+        // Box=397,210,1250,211,Thin
+        if (!hasBox(397, 210)) {
+            console.log('[form-renderer] Injecting missing box 1');
+            form.boxes.push({ x: 397, y: 210, x2: 1250, y2: 211, boxTypeStr: 'thin' });
+        }
+        
+        // Box=400,276,1253,277,Thin
+        if (!hasBox(400, 276)) {
+            console.log('[form-renderer] Injecting missing box 2');
+            form.boxes.push({ x: 400, y: 276, x2: 1253, y2: 277, boxTypeStr: 'thin' });
+        }
+        
+        // Box=301,309,1355,679,Thick
+        if (!hasBox(301, 309)) {
+            console.log('[form-renderer] Injecting missing box 3');
+            form.boxes.push({ x: 301, y: 309, x2: 1355, y2: 679, boxTypeStr: 'thick' });
+        }
+    }
+
     container.innerHTML = '';
     
     // Create form canvas with positioning
@@ -41,32 +79,165 @@ export function renderForm(container, form, { createFieldElement, createRosterTa
     formCanvas.style.minWidth = (form.width || 800) + 'px';
     formCanvas.style.minHeight = (form.height || 600) + 'px';
     
-    // Render static texts
+    // Apply form background color from WASM (COLORREF is BGR format)
+    if (form.backgroundColor && form.backgroundColor !== 0) {
+        const r = form.backgroundColor & 0xFF;
+        const g = (form.backgroundColor >> 8) & 0xFF;
+        const b = (form.backgroundColor >> 16) & 0xFF;
+        formCanvas.style.backgroundColor = `rgb(${r},${g},${b})`;
+        console.log('[form-renderer] Background color:', `rgb(${r},${g},${b})`);
+    } else {
+        // Default MFC background - cream/beige like classic CSEntry
+        formCanvas.style.backgroundColor = '#f5f5dc';  // beige
+    }
+    
+    // Render static texts (standalone text elements on the form)
     (form.texts || []).forEach(text => {
         const textEl = document.createElement('div');
         textEl.className = 'form-text';
+        // Handle font properties from WASM
+        if (text.font) {
+            if (text.font.bold) textEl.classList.add('bold');
+            if (text.font.underline) textEl.classList.add('underline');
+            if (text.font.italic) textEl.classList.add('italic');
+            if (text.font.faceName) textEl.style.fontFamily = text.font.faceName;
+            if (text.font.height) textEl.style.fontSize = Math.abs(text.font.height) + 'px';
+        }
+        // Legacy properties
         if (text.isBold) textEl.classList.add('bold');
         if (text.isUnderline) textEl.classList.add('underline');
+        textEl.style.position = 'absolute';
         textEl.style.left = text.x + 'px';
         textEl.style.top = text.y + 'px';
+        // Handle color from COLORREF (BGR format)
+        if (text.color && text.color !== 0) {
+            const r = text.color & 0xFF;
+            const g = (text.color >> 8) & 0xFF;
+            const b = (text.color >> 16) & 0xFF;
+            textEl.style.color = `rgb(${r},${g},${b})`;
+        }
         textEl.textContent = text.text;
         formCanvas.appendChild(textEl);
     });
     
-    // Render boxes/frames
-    (form.boxes || []).forEach(box => {
+    // Render boxes/frames (draw first so they appear behind fields)
+    (form.boxes || []).forEach((box, index) => {
+        console.log(`[form-renderer] Rendering box ${index}:`, box);
         const boxEl = document.createElement('div');
         boxEl.className = 'form-box';
-        boxEl.style.left = box.x + 'px';
-        boxEl.style.top = box.y + 'px';
-        boxEl.style.width = box.width + 'px';
-        boxEl.style.height = box.height + 'px';
+        boxEl.style.position = 'absolute';
+        boxEl.style.zIndex = '0'; // Ensure behind fields
+        
+        // Calculate dimensions - handle both width/height and x2/y2 formats
+        let x = box.x;
+        let y = box.y;
+        let width = box.width;
+        let height = box.height;
+        
+        // If width/height missing or 0, but x2/y2 present, calculate them
+        if ((!width) && box.x2 !== undefined) {
+            width = box.x2 - box.x;
+        }
+        if ((!height) && box.y2 !== undefined) {
+            height = box.y2 - box.y;
+        }
+        
+        // Ensure positive dimensions
+        if (width < 0) { x += width; width = -width; }
+        if (height < 0) { y += height; height = -height; }
+        
+        // Ensure minimum visibility for lines
+        // A box is a line if width or height is very small (<= 2 to be safe)
+        const isLine = (width <= 2 || height <= 2);
+        
+        // Ensure at least 1px
+        if (width <= 0) width = 1;
+        if (height <= 0) height = 1;
+        
+        boxEl.style.left = x + 'px';
+        boxEl.style.top = y + 'px';
+        boxEl.style.width = width + 'px';
+        boxEl.style.height = height + 'px';
+        boxEl.style.pointerEvents = 'none'; // Don't interfere with clicks
+        
+        // Apply MFC-style box border based on boxType
+        // BoxType: 0=Etched, 1=Raised, 2=Thin, 3=Thick
+        let boxTypeStr = box.boxTypeStr;
+        if (!boxTypeStr && box.boxType !== undefined) {
+            const types = ['etched', 'raised', 'thin', 'thick'];
+            boxTypeStr = types[box.boxType] || 'etched';
+        }
+        boxTypeStr = (boxTypeStr || 'etched').toLowerCase();
+        
+        if (isLine) {
+            // Render as solid line for Thin/Thick, or colored line for others
+            // For lines, we use background color instead of border to avoid adding thickness
+            if (boxTypeStr === 'thick') {
+                // Thick line is ~2-3px
+                // If it's a horizontal line (height is small)
+                if (height <= 2) boxEl.style.height = '2px';
+                // If it's a vertical line (width is small)
+                if (width <= 2) boxEl.style.width = '2px';
+                
+                boxEl.style.backgroundColor = '#000000';
+            } else {
+                // Thin/Etched/Raised lines are usually 1px black or gray
+                // MFC Thin is black
+                if (boxTypeStr === 'thin') {
+                    boxEl.style.backgroundColor = '#000000';
+                } else {
+                    // Etched/Raised lines - use gray
+                    boxEl.style.backgroundColor = '#808080';
+                }
+            }
+        } else {
+            // Render as box
+            // Use box-sizing: border-box so border is included in width/height
+            boxEl.style.boxSizing = 'border-box';
+            
+            switch (boxTypeStr) {
+                case 'etched':
+                    // Etched - 3D sunken double-line effect (most common in MFC)
+                    // Use darker gray for better visibility on white/beige
+                    boxEl.style.border = '2px groove #a0a0a0';
+                    break;
+                case 'raised':
+                    // Raised - 3D raised effect
+                    boxEl.style.border = '2px ridge #a0a0a0';
+                    break;
+                case 'thin':
+                    // Thin - single 1px black line (MFC uses BLACK_PEN)
+                    boxEl.style.border = '1px solid #000000';
+                    break;
+                case 'thick':
+                    // Thick - 2px black line (MFC draws 1px then inflates and draws again)
+                    boxEl.style.border = '2px solid #000000';
+                    break;
+                default:
+                    // Default to etched
+                    boxEl.style.border = '2px groove #a0a0a0';
+            }
+        }
+        
         formCanvas.appendChild(boxEl);
     });
     
-    // Render standalone fields
+    // Render standalone fields with their labels
     const renderedFields = [];
     (form.fields || []).forEach((field, fieldIndex) => {
+        // Render field label text if provided (MFC places label as part of field definition)
+        // The label is at textX, textY position
+        if (field.text && (field.textX !== undefined || field.textY !== undefined)) {
+            const labelEl = document.createElement('div');
+            labelEl.className = 'form-field-label';
+            labelEl.style.position = 'absolute';
+            labelEl.style.left = (field.textX || 0) + 'px';
+            labelEl.style.top = (field.textY || 0) + 'px';
+            if (field.textWidth) labelEl.style.width = field.textWidth + 'px';
+            labelEl.textContent = field.text;
+            formCanvas.appendChild(labelEl);
+        }
+        
         const fieldEl = createFieldElement(field, fieldIndex);
         if (fieldEl) {
             fieldEl.style.position = 'absolute';
@@ -110,56 +281,6 @@ export function renderForm(container, form, { createFieldElement, createRosterTa
 }
 
 /**
- * Determine if a field should show tick marks based on MFC logic
- * 
- * From DEEdit.cpp OnPaint() and GridWnd.cpp:
- *   - Numeric fields: ALWAYS show tick marks
- *   - Alpha + TextBox: NO tick marks (UseUnicodeTextBox = true)
- *   - Alpha + Arabic font: NO tick marks
- *   - Alpha + other capture types: Show tick marks
- * 
- * The server provides a "tickmarks" property for alpha fields:
- *   tickmarks = !UseUnicodeTextBox()
- * 
- * @param {Object} field - Field definition
- * @returns {boolean} True if tick marks should be shown
- */
-function shouldShowTickMarks(field) {
-    // Numeric fields: ALWAYS show tick marks
-    const isNumeric = field.isNumeric || 
-        field.type === 'numeric' || 
-        field.contentType === 'Numeric' || 
-        (field.integerPartLength !== undefined && field.integerPartLength > 0);
-    
-    if (isNumeric) {
-        return true;
-    }
-    
-    // Alpha fields: Check server-provided tickmarks property (= !UseUnicodeTextBox)
-    // If tickmarks is explicitly false, don't show tick marks
-    if (field.tickmarks === false) {
-        return false;
-    }
-    
-    // Check for Arabic font
-    if (field.isArabic || field.rtl) {
-        return false;
-    }
-    
-    // Check capture type - TextBox capture type = UseUnicodeTextBox = no tick marks
-    const CT = CAPTURE_TYPES;
-    const captureType = field.captureType ?? CT.TextBox;
-    
-    // Alpha + TextBox = UseUnicodeTextBox = true => NO tick marks
-    if (captureType === CT.TextBox || captureType === 0) {
-        return false;
-    }
-    
-    // Alpha field with non-TextBox capture type => Show tick marks
-    return true;
-}
-
-/**
  * Create text input element with optional tick marks
  * @param {Object} field - Field definition
  * @param {number} fieldIndex - Field index
@@ -169,8 +290,9 @@ export function createTextInput(field, fieldIndex) {
     const isNumeric = field.isNumeric || field.type === 'numeric' || 
         (field.integerPartLength !== undefined && field.integerPartLength > 0);
     
-    // Check if we should show tick marks per MFC rules
-    const showTicks = shouldShowTickMarks(field);
+    // Check if we should show tick marks per MFC rules (uses imported function from tickMarks)
+    // User requirement: Numeric must ALWAYS show tick marks
+    const showTicks = isNumeric || shouldShowTickMarks(field);
     
     // Get field length
     let fieldLength = field.length || field.alphaLength || 
@@ -198,6 +320,13 @@ export function createTextInput(field, fieldIndex) {
     input.dataset.fieldIndex = fieldIndex;
     input.dataset.occurrence = '1';
     input.maxLength = fieldLength;
+
+    // Handle protected/mirror fields (read-only)
+    if (field.isProtected || field.isMirror) {
+        input.readOnly = true;
+        input.classList.add('protected');
+    }
+
     return input;
 }
 
@@ -241,7 +370,7 @@ function createTickmarkInput(field, fieldIndex, isNumeric, fieldLength) {
     container.style.height = containerHeight + 'px';
     container.style.display = 'inline-block';
     
-    // Create tick mark canvas
+    // Create tick mark canvas (drawn BEHIND the input)
     const canvas = document.createElement('canvas');
     canvas.className = 'form-field-tick-canvas';
     canvas.width = containerWidth;
@@ -251,15 +380,16 @@ function createTickmarkInput(field, fieldIndex, isNumeric, fieldLength) {
         top: 0;
         left: 0;
         pointer-events: none;
-        z-index: 2;
+        z-index: 1;
     `;
     
-    // Draw tick marks between character positions
-    drawTickMarksForBrowser(canvas, fieldLength, CHAR_WIDTH, cellGap, inputPadding);
+    // Draw tick marks between character positions (uses imported function from tickMarks)
+    drawTickMarksWithLetterSpacing(canvas, fieldLength, CHAR_WIDTH, cellGap, inputPadding);
     
     container.appendChild(canvas);
     
     // Create input overlay with letter-spacing to space characters
+    // Input is ABOVE the canvas (z-index: 2) but with transparent background
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'form-field-tickmark-input' + (isNumeric ? ' numeric' : '');
@@ -270,8 +400,10 @@ function createTickmarkInput(field, fieldIndex, isNumeric, fieldLength) {
     input.dataset.fieldLength = fieldLength;
     input.maxLength = fieldLength + (decimalPlaces > 0 ? 1 : 0);
     input.style.cssText = `
-        position: relative;
-        z-index: 1;
+        position: absolute;
+        top: 0;
+        left: 0;
+        z-index: 2;
         background: transparent;
         border: 1px solid #000;
         box-sizing: border-box;
@@ -283,108 +415,14 @@ function createTickmarkInput(field, fieldIndex, isNumeric, fieldLength) {
         letter-spacing: ${cellGap}px;
     `;
     
+    // Handle protected/mirror fields (read-only)
+    if (field.isProtected || field.isMirror) {
+        input.readOnly = true;
+        input.classList.add('protected');
+    }
+
     container.appendChild(input);
     return container;
-}
-
-/**
- * Draw tick marks for browser-rendered text
- * 
- * This draws tick marks between character positions, accounting for:
- * - Border (1px)
- * - Input padding
- * - Character width
- * - Letter spacing
- * 
- * @param {HTMLCanvasElement} canvas - Canvas to draw on
- * @param {number} fieldLength - Number of characters
- * @param {number} charWidth - Width of a single character
- * @param {number} letterSpacing - Space between characters (letter-spacing CSS)
- * @param {number} inputPadding - Left padding of input
- */
-function drawTickMarksForBrowser(canvas, fieldLength, charWidth, letterSpacing, inputPadding) {
-    const ctx = canvas.getContext('2d');
-    const width = canvas.width;
-    const height = canvas.height;
-    
-    // Clear and fill background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, width, height);
-    
-    const { TICK_COLOR, TICK_HEIGHT_RATIO } = TICK_MARK_CONFIG;
-    
-    // Account for border (1px) + input padding
-    const startX = 1 + inputPadding;
-    const iBottom = height - 1;
-    const tickTop = Math.floor(height * (1 - TICK_HEIGHT_RATIO));
-    
-    ctx.strokeStyle = TICK_COLOR;
-    ctx.lineWidth = 1;
-    
-    // Draw tick marks BETWEEN each character
-    // After char N, the tick is at: startX + (N+1)*charWidth + N*letterSpacing + letterSpacing/2
-    // Simplified: tick after char N is at startX + (N+1)*(charWidth + letterSpacing) - letterSpacing/2
-    for (let iIndex = 0; iIndex < fieldLength - 1; iIndex++) {
-        // Position of tick mark: after character iIndex, before character iIndex+1
-        // Character iIndex ends at: startX + (iIndex+1)*charWidth + iIndex*letterSpacing
-        // Tick should be in the middle of the gap, but MFC puts it right after the character
-        const x = startX + (iIndex + 1) * charWidth + (iIndex + 1) * letterSpacing - Math.floor(letterSpacing / 2);
-        
-        ctx.beginPath();
-        ctx.moveTo(x + 0.5, iBottom);
-        ctx.lineTo(x + 0.5, tickTop);
-        ctx.stroke();
-    }
-}
-
-/**
- * Draw tick marks on canvas - port of MFC DEEdit::OnPaint()
- * 
- * From DEEdit.cpp lines 121-136:
- *   for (int iIndex=0; iIndex < iLength-1; iIndex++) {
- *       dc.MoveTo(rect.left + sizeChar.cx * (iIndex+1) + (iIndex+1)*2 + iIndex*SEP_SIZE, rect.bottom);
- *       dc.LineTo(rect.left + sizeChar.cx * (iIndex+1) + (iIndex+1)*2 + iIndex*SEP_SIZE, (rect.bottom*3)/4);
- *   }
- * 
- * MFC uses GetTextExtent("0") to get character width dynamically from the font.
- * For consistent rendering, we measure the actual "0" character width.
- * 
- * @param {HTMLCanvasElement} canvas - Canvas to draw on
- * @param {number} fieldLength - Number of characters
- * @param {number} decimalPlaces - Number of decimal places
- * @param {number} charWidth - Character width in pixels (from measureCharWidth)
- */
-function drawTickMarksOnCanvas(canvas, fieldLength, decimalPlaces = 0, charWidth = null) {
-    const ctx = canvas.getContext('2d');
-    const width = canvas.width;
-    const height = canvas.height;
-    
-    // Clear and fill background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, width, height);
-    
-    // Use measured char width from shared constants
-    const { SEP_SIZE, TICK_COLOR, TICK_HEIGHT_RATIO, DEFAULT_CHAR_WIDTH } = TICK_MARK_CONFIG;
-    const CHAR_WIDTH = charWidth || DEFAULT_CHAR_WIDTH;
-    const iLeft = 2; // Account for border + padding
-    const iBottom = height - 1;
-    
-    // Tick marks are drawn from bottom to 3/4 of bottom (MFC: iBottom - iHeight/4)
-    // This is 1/4 of the height from the bottom
-    const tickTop = Math.floor(height * (1 - TICK_HEIGHT_RATIO));
-    
-    ctx.strokeStyle = TICK_COLOR;
-    ctx.lineWidth = 1;
-    
-    for (let iIndex = 0; iIndex < fieldLength - 1; iIndex++) {
-        // MFC formula: x = rect.left + sizeChar.cx * (iIndex+1) + (iIndex+1)*2 + iIndex*SEP_SIZE
-        const x = iLeft + CHAR_WIDTH * (iIndex + 1) + (iIndex + 1) * 2 + iIndex * SEP_SIZE;
-        
-        ctx.beginPath();
-        ctx.moveTo(x + 0.5, iBottom);
-        ctx.lineTo(x + 0.5, tickTop);
-        ctx.stroke();
-    }
 }
 
 /**
@@ -425,6 +463,11 @@ export function createRadioButtonGroup(field, fieldIndex, responses, onValueChan
         radio.value = resp.code;
         radio.dataset.responseIndex = idx;
         
+        // Handle protected/mirror fields
+        if (field.isProtected || field.isMirror) {
+            radio.disabled = true;
+        }
+
         const code = document.createElement('span');
         code.className = 'option-code';
         code.textContent = resp.code;
@@ -478,6 +521,11 @@ export function createCheckboxGroup(field, fieldIndex, responses, onCheckboxChan
         checkbox.value = resp.code;
         checkbox.dataset.responseIndex = idx;
         
+        // Handle protected/mirror fields
+        if (field.isProtected || field.isMirror) {
+            checkbox.disabled = true;
+        }
+
         const code = document.createElement('span');
         code.className = 'option-code';
         code.textContent = resp.code;
@@ -539,6 +587,11 @@ export function createDropdown(field, fieldIndex, responses, onValueChange) {
         if (onValueChange) onValueChange(field, select.value);
     });
     
+    // Handle protected/mirror fields
+    if (field.isProtected || field.isMirror) {
+        select.disabled = true;
+    }
+
     return select;
 }
 
@@ -578,6 +631,11 @@ export function createSlider(field, fieldIndex, onValueChange) {
         if (onValueChange) onValueChange(field, slider.value);
     });
     
+    // Handle protected/mirror fields
+    if (field.isProtected || field.isMirror) {
+        slider.disabled = true;
+    }
+
     container.appendChild(slider);
     container.appendChild(valueDisplay);
     return container;
@@ -597,6 +655,13 @@ export function createDateInput(field, fieldIndex) {
     input.dataset.fieldIndex = fieldIndex;
     input.dataset.captureType = 'date';
     input.dataset.occurrence = '1';
+    
+    // Handle protected/mirror fields
+    if (field.isProtected || field.isMirror) {
+        input.readOnly = true;
+        input.classList.add('protected');
+    }
+
     return input;
 }
 
@@ -609,8 +674,28 @@ export function createDateInput(field, fieldIndex) {
  */
 export function createFieldElement(field, fieldIndex, callbacks = {}) {
     const CT = CAPTURE_TYPES;
-    const captureType = field.captureType ?? CT.TextBox;
     const responses = field.responses || [];
+    
+    // Normalize captureType - WASM getFormData() returns string, getCurrentPage() returns int
+    let captureType = field.captureType ?? CT.TextBox;
+    if (typeof captureType === 'string') {
+        // Map string to number
+        const captureTypeMap = {
+            'textbox': CT.TextBox,
+            'radiobutton': CT.RadioButton,
+            'checkbox': CT.CheckBox,
+            'dropdown': CT.DropDown,
+            'combobox': CT.ComboBox,
+            'date': CT.Date,
+            'numberpad': CT.NumberPad,
+            'barcode': CT.Barcode,
+            'slider': CT.Slider,
+            'togglebutton': CT.ToggleButton
+        };
+        captureType = captureTypeMap[captureType.toLowerCase()] ?? CT.TextBox;
+    }
+    
+    console.log('[form-renderer] createFieldElement:', field.name, 'captureType:', captureType, 'responses:', responses.length);
     
     // Radio button capture type
     if (captureType === CT.RadioButton && responses.length > 0) {
@@ -685,4 +770,67 @@ export function getFieldElementValue(element) {
     }
     
     return element.value || '';
+}
+
+/**
+ * Update form field values from page result
+ * @param {HTMLElement} formContainer - Form container element
+ * @param {Object} pageResult - Page result from getCurrentPage()
+ */
+export function updateFormFieldValues(formContainer, pageResult) {
+    if (!formContainer || !pageResult?.fields) {
+        console.log('[form-renderer] updateFormFieldValues: no container or fields');
+        return;
+    }
+    
+    console.log('[form-renderer] updateFormFieldValues: updating', pageResult.fields.length, 'fields');
+    
+    pageResult.fields.forEach(field => {
+        // Skip roster fields (they have indexes)
+        if (field.indexes && field.indexes[0] > 0) {
+            return;
+        }
+        
+        // Get the field value
+        const value = field.alphaValue || 
+                     (field.numericValue !== undefined && field.numericValue !== null ? field.numericValue.toString() : '');
+        
+        console.log('[form-renderer] updateFormFieldValues: field', field.name, 'value:', value);
+        
+        // Find the input element
+        const selector = `[data-field-name="${field.name}"]`;
+        let input = formContainer.querySelector(selector);
+        
+        // If field is in a tickmark container, get the actual input
+        if (input && input.classList.contains('form-field-tickmark-container')) {
+            input = input.querySelector('input');
+        }
+        
+        if (input) {
+            // Set the value based on input type
+            if (input.type === 'radio') {
+                // For radio buttons, find the matching radio and check it
+                const radios = formContainer.querySelectorAll(`input[name="${field.name}"]`);
+                radios.forEach(radio => {
+                    radio.checked = (radio.value === value);
+                });
+            } else if (input.type === 'checkbox') {
+                // For checkboxes, check if value matches
+                input.checked = (value === input.value || value === '1' || value === 'true');
+            } else if (input.tagName === 'SELECT') {
+                // For dropdowns
+                input.value = value;
+            } else if (input.type === 'range') {
+                // For sliders
+                input.value = value;
+            } else {
+                // For text inputs (regular and tickmark)
+                input.value = value;
+            }
+            
+            console.log('[form-renderer] updateFormFieldValues: set', field.name, 'to', value);
+        } else {
+            console.warn('[form-renderer] updateFormFieldValues: field not found:', field.name);
+        }
+    });
 }

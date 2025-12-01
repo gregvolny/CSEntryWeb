@@ -3,19 +3,15 @@
 <head>
     <meta charset="utf-8">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
     <script>
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        // Create global CS instance - unified action-invoker handles environment detection
+        window.CS = new CSProActionInvoker('');
         
-        if (isWebMode) {
-            console.log('[Image-view] Running in web mode');
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            console.log('[Image-view] Running in native mode, loading action-invoker.js');
-            document.write('<script src="/action-invoker.js"><\/script>');
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
+            window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
         }
     </script>
     <script src="/external/jquery/jquery.min.js"></script>
@@ -37,12 +33,10 @@
     <img id="image" onclick="closeDialog();" />
 
     <script>
-        // Initialize CS based on mode
-        let CS;
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            CS = new CSProActionInvoker('');
-            window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
-            console.log('[Image-view] Sent cspro-dialog-ready to parent');
+        // CS already created above in unified block
+        // For web mode, listen for input data
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
+            console.log('[Image-view] Waiting for cspro-input-ready event');
             
             // Listen for initialization message from parent via cspro-input-ready event
             window.addEventListener('cspro-input-ready', (event) => {
@@ -51,11 +45,10 @@
             });
             
             // Check if already initialized
-            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+            if (typeof CSProActionInvokerWebState !== 'undefined' && CSProActionInvokerWebState.initialized) {
                 initializeImageViewDialog();
             }
         } else {
-            CS = new CSProActionInvoker("dd005955343719278b46cc15ea9aacae");
             // Native mode - initialize immediately
             initializeImageViewDialog();
         }

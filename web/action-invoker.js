@@ -343,7 +343,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(37688, self.accessToken, args)));
             },
             copyAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.copyAsync');
+                if (self._isWebMode) return self._webProxyAction('File.copyAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(37688, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -355,7 +355,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(23568, self.accessToken, args)));
             },
             readBytesAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.readBytesAsync');
+                if (self._isWebMode) return self._webProxyAction('File.readBytesAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(23568, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -367,7 +367,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(43700, self.accessToken, args)));
             },
             readLinesAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.readLinesAsync');
+                if (self._isWebMode) return self._webProxyAction('File.readLinesAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(43700, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -379,7 +379,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(29118, self.accessToken, args)));
             },
             readTextAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.readTextAsync');
+                if (self._isWebMode) return self._webProxyAction('File.readTextAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(29118, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -391,7 +391,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(63893, self.accessToken, args)));
             },
             writeBytesAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.writeBytesAsync');
+                if (self._isWebMode) return self._webProxyAction('File.writeBytesAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(63893, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -403,7 +403,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(55855, self.accessToken, args)));
             },
             writeLinesAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.writeLinesAsync');
+                if (self._isWebMode) return self._webProxyAction('File.writeLinesAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(55855, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -415,7 +415,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(60631, self.accessToken, args)));
             },
             writeTextAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('File.writeTextAsync');
+                if (self._isWebMode) return self._webProxyAction('File.writeTextAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(60631, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -649,7 +649,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(20380, self.accessToken, args)));
             },
             createDirectoryAsync: (args) => {
-                if (self._isWebMode) return Promise.resolve(false);
+                if (self._isWebMode) return self._webProxyAction('Path.createDirectoryAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(20380, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -664,7 +664,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(36724, self.accessToken, args)));
             },
             getDirectoryListingAsync: (args) => {
-                if (self._isWebMode) return Promise.resolve({ path: args?.path || '/', paths: [], parent: null });
+                if (self._isWebMode) return self._webProxyAction('Path.getDirectoryListingAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(36724, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -682,7 +682,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(59076, self.accessToken, args)));
             },
             getPathInfoAsync: (args) => {
-                if (self._isWebMode) return Promise.resolve(self.Path.getPathInfo(args));
+                if (self._isWebMode) return self._webProxyAction('Path.getPathInfoAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(59076, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -694,7 +694,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(41709, self.accessToken, args)));
             },
             getSpecialPathsAsync: (args) => {
-                if (self._isWebMode) return Promise.resolve({});
+                if (self._isWebMode) return self._webProxyAction('Path.getSpecialPathsAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(41709, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -706,7 +706,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(62012, self.accessToken, args)));
             },
             selectFileAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Path.selectFileAsync');
+                if (self._isWebMode) return self._webProxyAction('Path.selectFileAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(62012, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -718,7 +718,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(35645, self.accessToken, args)));
             },
             showFileDialogAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Path.showFileDialogAsync');
+                if (self._isWebMode) return self._webProxyAction('Path.showFileDialogAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(35645, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -787,7 +787,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(36421, self.accessToken, args)));
             },
             closeAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Sqlite.closeAsync');
+                if (self._isWebMode) return self._webProxyAction('Sqlite.closeAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(36421, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -799,7 +799,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(31287, self.accessToken, args)));
             },
             execAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Sqlite.execAsync');
+                if (self._isWebMode) return self._webProxyAction('Sqlite.execAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(31287, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -811,7 +811,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(55316, self.accessToken, args)));
             },
             openAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Sqlite.openAsync');
+                if (self._isWebMode) return self._webProxyAction('Sqlite.openAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(55316, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -823,7 +823,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(40839, self.accessToken, args)));
             },
             rekeyAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('Sqlite.rekeyAsync');
+                if (self._isWebMode) return self._webProxyAction('Sqlite.rekeyAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(40839, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -841,7 +841,7 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(49116, self.accessToken, args)));
             },
             getSharableUriAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('System.getSharableUriAsync');
+                if (self._isWebMode) return self._webProxyAction('System.getSharableUriAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(49116, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
@@ -853,10 +853,39 @@ class CSProActionInvoker {
                         NativeActionInvokerImpl.createMessage(14855, self.accessToken, args)));
             },
             selectDocumentAsync: (args) => {
-                if (self._isWebMode) return self._webNotSupportedAsync('System.selectDocumentAsync');
+                if (self._isWebMode) return self._webProxyAction('System.selectDocumentAsync', args);
                 return NativeActionInvokerImpl.runAsync(
                     NativeActionInvokerImpl.createMessage(14855, self.accessToken, args))
                     .then(NativeActionInvokerImpl.processResponse);
+            },
+            // Extended System Info for Web
+            getOS: () => {
+                if (self._isWebMode) {
+                    const ua = navigator.userAgent;
+                    if (ua.indexOf("Win") !== -1) return "Windows";
+                    if (ua.indexOf("Mac") !== -1) return "MacOS";
+                    if (ua.indexOf("Linux") !== -1) return "Linux";
+                    if (ua.indexOf("Android") !== -1) return "Android";
+                    if (ua.indexOf("like Mac") !== -1) return "iOS";
+                    return "Web";
+                }
+                return "Native";
+            },
+            getDeviceId: () => {
+                if (self._isWebMode) {
+                    let id = localStorage.getItem('cspro_device_id');
+                    if (!id) {
+                        id = crypto.randomUUID();
+                        localStorage.setItem('cspro_device_id', id);
+                    }
+                    return id;
+                }
+                return "NativeDevice";
+            },
+            exec: (args) => {
+                if (self._isWebMode) return self._webProxyAction('System.exec', args);
+                // Native implementation would go here if supported
+                return self._webNotSupported('System.exec');
             }
         };
         

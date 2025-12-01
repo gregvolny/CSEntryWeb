@@ -351,7 +351,7 @@ function escapeHtml(text) {
  * @param {Object} component - CSEntryMFCView component instance (optional)
  * @param {Function} sendResponse - Function to send response back to iframe
  */
-export function handleCapiAction(event, component, sendResponse) {
+export async function handleCapiAction(event, component, sendResponse) {
     if (!event.data || event.data.type !== 'csproAction') return;
     
     const { action, args, requestId } = event.data;
@@ -372,7 +372,26 @@ export function handleCapiAction(event, component, sendResponse) {
         57200: 'UI.getInputData',
         62732: 'UI.setDisplayOptions',
         48073: 'UI.alert',
-        41655: 'UI.showDialog'
+        41655: 'UI.showDialog',
+        // File
+        37688: 'File.copy',
+        23568: 'File.readBytes',
+        43700: 'File.readLines',
+        29118: 'File.readText',
+        63893: 'File.writeBytes',
+        55855: 'File.writeLines',
+        60631: 'File.writeText',
+        // Path
+        20380: 'Path.createDirectory',
+        36724: 'Path.getDirectoryListing',
+        59076: 'Path.getPathInfo',
+        62012: 'Path.selectFile',
+        35645: 'Path.showFileDialog',
+        // Sqlite
+        36421: 'Sqlite.close',
+        31287: 'Sqlite.exec',
+        55316: 'Sqlite.open',
+        40839: 'Sqlite.rekey'
     };
     
     // Convert numeric action code to string name
@@ -430,6 +449,9 @@ export function handleCapiAction(event, component, sendResponse) {
             return null;
         }
     };
+
+    // Helper to access WASM FS
+    const getFS = () => component?._wasmModule?.FS;
     
     switch (actionName) {
         case 'Logic.eval':
@@ -479,10 +501,13 @@ export function handleCapiAction(event, component, sendResponse) {
                     };
                     
                     // Execute the logic (handles both function calls and general expressions)
-                    doEvalLogic(logic).catch(err => {
+                    // Await the result to return it
+                    try {
+                        result = await doEvalLogic(logic);
+                    } catch (err) {
                         console.error('[CAPI] evalLogic error:', err);
-                    });
-                    result = true;
+                        result = null;
+                    }
                 }
             } else {
                 console.warn('[CAPI] No engine or component available for Logic.eval');
@@ -528,13 +553,176 @@ export function handleCapiAction(event, component, sendResponse) {
                         return invokeResult;
                     };
                     
-                    doInvokeFunction().catch(err => {
+                    try {
+                        result = await doInvokeFunction();
+                    } catch (err) {
                         console.error('[CAPI] invokeLogicFunction error:', err);
-                    });
-                    result = true;
+                        result = null;
+                    }
                 }
             }
             break;
+
+        // File Namespace Implementation
+        case 'File.readText':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path || args;
+                        result = FS.readFile(path, { encoding: 'utf8' });
+                    } catch (e) { console.warn('File.readText failed:', e); result = null; }
+                }
+            }
+            break;
+        case 'File.writeText':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path;
+                        const content = args?.text || args?.content;
+                        FS.writeFile(path, content);
+                        if (component && component.syncStorage) component.syncStorage();
+                        result = true;
+                    } catch (e) { console.warn('File.writeText failed:', e); result = false; }
+                }
+            }
+            break;
+        case 'File.readLines':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path || args;
+                        const content = FS.readFile(path, { encoding: 'utf8' });
+                        result = content.split(/\r?\n/);
+                    } catch (e) { console.warn('File.readLines failed:', e); result = []; }
+                }
+            }
+            break;
+        case 'File.writeLines':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path;
+                        const lines = args?.lines || [];
+                        FS.writeFile(path, lines.join('\n'));
+                        if (component && component.syncStorage) component.syncStorage();
+                        result = true;
+                    } catch (e) { console.warn('File.writeLines failed:', e); result = false; }
+                }
+            }
+            break;
+
+        // Path Namespace Implementation
+        case 'Path.createDirectory':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path || args;
+                        FS.mkdir(path);
+                        if (component && component.syncStorage) component.syncStorage();
+                        result = true;
+                    } catch (e) { 
+                        if (e.code === 'EEXIST') result = true;
+                        else { console.warn('Path.createDirectory failed:', e); result = false; }
+                    }
+                }
+            }
+            break;
+        case 'Path.getDirectoryListing':
+            {
+                const FS = getFS();
+                if (FS) {
+                    try {
+                        const path = args?.path || '/';
+                        const entries = FS.readdir(path).filter(x => x !== '.' && x !== '..');
+                        result = { path, paths: entries, parent: path === '/' ? null : '..' };
+                    } catch (e) { console.warn('Path.getDirectoryListing failed:', e); result = { path: args?.path, paths: [] }; }
+                }
+            }
+            break;
+        case 'Path.selectFile':
+            // Ask user to select between local file system and OPFS file system
+            // For now, we'll implement a simple file picker that uploads to WASM FS
+            if (component) {
+                // TODO: Implement UI to choose between Local/OPFS
+                // For now, trigger browser file picker
+                result = await new Promise((resolve) => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.onchange = async (e) => {
+                        if (e.target.files.length > 0) {
+                            const file = e.target.files[0];
+                            // Upload to WASM FS
+                            const FS = getFS();
+                            if (FS) {
+                                const buffer = await file.arrayBuffer();
+                                const targetPath = '/data/' + file.name;
+                                try {
+                                    FS.writeFile(targetPath, new Uint8Array(buffer));
+                                    if (component && component.syncStorage) component.syncStorage();
+                                    resolve(targetPath);
+                                } catch (err) {
+                                    console.error('Failed to write file:', err);
+                                    resolve(null);
+                                }
+                            } else {
+                                resolve(null);
+                            }
+                        } else {
+                            resolve(null);
+                        }
+                    };
+                    input.click();
+                });
+            }
+            break;
+
+        // System Namespace
+        case 'System.exec':
+            console.log('[CAPI] System.exec:', args);
+            // Call server API to execute command
+            if (component) {
+                 const sessionId = component._sessionId;
+                 if (sessionId) {
+                     try {
+                         const response = await fetch(`/api/cspro/session/${sessionId}/exec`, {
+                             method: 'POST',
+                             headers: { 'Content-Type': 'application/json' },
+                             body: JSON.stringify({ command: args })
+                         });
+                         const data = await response.json();
+                         result = data.success ? 1 : 0;
+                     } catch (e) {
+                         console.error('[CAPI] System.exec failed:', e);
+                         result = 0;
+                     }
+                 } else {
+                     console.warn('[CAPI] System.exec: No session ID (client-side mode)');
+                     result = 0;
+                 }
+            }
+            break;
+
+        // Sqlite Namespace (Stub/Pass-through)
+        case 'Sqlite.open':
+        case 'Sqlite.exec':
+        case 'Sqlite.close':
+            // If engine supports it, call engine
+            // Otherwise, we can't easily do it from JS without direct access to SQLite symbols
+            if (engine && engine.sqliteExec) {
+                 // Assuming engine exposes a generic sqliteExec
+                 result = await engine.sqliteExec(actionName.split('.')[1], args);
+            } else {
+                console.warn('Sqlite actions not fully implemented in Web CAPI yet');
+                result = false;
+            }
+            break;
+
             
         case 'Logic.getSymbolValue':
             if (engine && typeof engine.getFieldValue === 'function') {

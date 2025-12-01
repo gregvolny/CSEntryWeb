@@ -48,6 +48,76 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         return sessionId;
     };
     
+    // Helper to handle server responses, including suspended dialogs
+    const handleResponse = async (responsePromise) => {
+        let response = await responsePromise;
+        
+        // Handle session expiry/not found (e.g. after server restart)
+        if (response.status === 500) {
+            try {
+                const errorData = await response.clone().json();
+                if (errorData.error && errorData.error.includes('Session not found')) {
+                    console.warn('[ServerProxy] Session not found, creating new session and retrying...');
+                    sessionId = null;
+                    await ensureSession();
+                    // Retry the original request (we need to reconstruct it, but we can't easily here)
+                    // For now, throw error to let caller handle retry or fail
+                    // Ideally, we should wrap the fetch call itself
+                    throw new Error('Session expired');
+                }
+            } catch (e) {
+                // Ignore parse error
+            }
+        }
+
+        let data = await response.json();
+
+        // Handle suspended dialog (interactive server-side dialog)
+        if (data.status === 'dialog') {
+            console.log('[ServerProxy] Server suspended on dialog:', data.dialog.dialogName);
+            
+            if (!component || typeof component._showServerDialog !== 'function') {
+                console.error('[ServerProxy] Component does not support server dialogs');
+                throw new Error('Component does not support server dialogs');
+            }
+            
+            // Show dialog and get result
+            // _showServerDialog returns the result string/object
+            const dialogResult = await component._showServerDialog(data.dialog);
+            
+            console.log('[ServerProxy] Dialog result:', dialogResult);
+            
+            // Parse if it's a string, so we send an object to the API
+            // The server expects an object which it will then stringify for WASM
+            let parsedResult = dialogResult;
+            if (typeof dialogResult === 'string') {
+                try {
+                    parsedResult = JSON.parse(dialogResult);
+                } catch (e) {
+                    // Keep as string if not valid JSON
+                }
+            }
+            
+            // Submit result back to server
+            // Recursively handle the response (could be another dialog or final result)
+            return handleResponse(fetch(`/api/cspro/session/${sessionId}/dialog`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ response: parsedResult })
+            }));
+        }
+        
+        // Handle legacy "dialogs" array (informational/auto-acknowledged)
+        if (data.dialogs && data.dialogs.length > 0 && component) {
+             console.log('[ServerProxy] Processing informational dialogs:', data.dialogs.length);
+             for (const dialog of data.dialogs) {
+                 await component._showServerDialog(dialog);
+             }
+        }
+        
+        return data;
+    };
+
     return {
         // ==================== SESSION MANAGEMENT ====================
         // Maps to: C_ExentryStart, C_ExentryInit, C_ExentryStop
@@ -68,18 +138,21 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         async loadEmbeddedAsset(pffPath) {
             await ensureSession();
             
-            const response = await fetch(`/api/cspro/session/${sessionId}/load-embedded`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pffPath: pffPath })
-            });
-            
-            const data = await response.json();
+            const makeRequest = async () => {
+                return fetch(`/api/cspro/session/${sessionId}/load-embedded`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pffPath: pffPath })
+                });
+            };
+
+            // Use handleResponse wrapper
+            const data = await handleResponse(makeRequest());
             return data.success;
         },
         
         // Load application with files
-        async loadApplicationWithFiles(pffContent, files) {
+        async loadApplicationWithFiles(pffContent, files, appName = null) {
             await ensureSession();
             
             // Prepare files for transmission
@@ -97,37 +170,54 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
                 }
             }
             
-            const response = await fetch(`/api/cspro/session/${sessionId}/load`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    pffContent: pffContent,
-                    applicationFiles: processedFiles
-                })
-            });
+            const makeRequest = async () => {
+                return fetch(`/api/cspro/session/${sessionId}/load`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pffContent: pffContent,
+                        applicationFiles: processedFiles,
+                        appName: appName
+                    })
+                });
+            };
+
+            // Use handleResponse wrapper
+            const data = await handleResponse(makeRequest());
             
-            const data = await response.json();
+            if (!data.success) {
+                console.error('[ServerProxy] loadApplicationWithFiles failed:', data.error);
+            }
             return data.success;
         },
         
         // Start entry session (C_ExentryStart with mode)
         async start(mode) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/start`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/start`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: mode || 'add' })
-            });
-            const data = await response.json();
+            }));
             return data.success;
         },
         
         // Stop entry session (C_ExentryStop)
         async stop() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/stop`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/stop`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
+            return data.success;
+        },
+
+        // End case (C_ExentryStop with save=true)
+        // Maps to MFC C_EndCase / C_ExentryStop(true)
+        async endCase(save = true) {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/stop`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ save })
+            }));
             return data.success;
         },
         
@@ -138,6 +228,26 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
             const response = await fetch(`/api/cspro/session/${sessionId}/form-data`);
             const data = await response.json();
             return data;
+        },
+        
+        // ==================== CASE LIST ====================
+        // Maps to: GetSequentialCaseIds, ModifyCase
+        
+        async getSequentialCaseIds() {
+            await ensureSession();
+            const response = await fetch(`/api/cspro/session/${sessionId}/cases`);
+            const data = await response.json();
+            return data.success ? data.cases : [];
+        },
+        
+        async modifyCase(position) {
+            await ensureSession();
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/modify-case`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ position })
+            }));
+            return data.success;
         },
         
         // ==================== PAGE/FIELD STATE ====================
@@ -155,35 +265,23 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Advance field with value (maps to MFC OnEditEnter behavior)
         async advanceField(value) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/advance`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/advance`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ value: value })
-            });
-            const data = await response.json();
+            }));
             return data.success;
         },
         
         // Set field value and advance (C_FldPutVal + C_GoToField(ENGINE_NEXTFIELD))
         // Returns page data with the next field info
         async setFieldValueAndAdvance(value) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/advance`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/advance`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ value: value !== undefined ? String(value) : '' })
-            });
-            const data = await response.json();
+            }));
             console.log('[ServerProxy] setFieldValueAndAdvance response:', data);
-            
-            // Handle server-side dialogs (errmsg, etc.)
-            // These dialogs were auto-acknowledged by the server but need to be shown to the user
-            if (data.dialogs && data.dialogs.length > 0) {
-                console.log('[ServerProxy] Server triggered dialogs:', data.dialogs.length);
-                for (const dialog of data.dialogs) {
-                    console.log('[ServerProxy] Showing server dialog:', dialog.dialogName);
-                    await component._showServerDialog(dialog);
-                }
-            }
             
             if (data.success && data.page) {
                 // Include dialogs in return so component can also process if needed
@@ -195,11 +293,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         // Next field (C_GoToField(ENGINE_NEXTFIELD))
         // Moves forward without setting a value (for skip scenarios)
         async nextField() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/next`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/next`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -208,11 +305,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Previous field (C_GoToField(ENGINE_BACKFIELD))
         async previousField() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/previous`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/previous`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -222,7 +318,7 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         // Go to specific field (C_MoveToField)
         // Maps to MFC's C_MoveToField(pTargetFld, bPostProc)
         async goToField(fieldSymbol, occurrence1 = 1, occurrence2 = 0, occurrence3 = 0) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/goto`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/goto`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
@@ -231,8 +327,7 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
                     occurrence2, 
                     occurrence3 
                 })
-            });
-            const data = await response.json();
+            }));
             return data.success ? data.page : null;
         },
         
@@ -241,22 +336,20 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // End roster/group (C_EndGroup)
         async endRoster() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/end-roster`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/end-roster`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             return data.success;
         },
         
         // End group with postproc flag (C_EndGroup) - Note: WASM binding takes no arguments
         async endGroup() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/end-group`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/end-group`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({})
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -265,12 +358,11 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // End level (C_EndLevel)
         async endLevel(nextLevel = -1, writeNode = true) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/end-level`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/end-level`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nextLevel, writeNode })
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -279,12 +371,11 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // End group occurrence (C_EndGroupOcc)
         async endGroupOcc(postProc = true) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/end-group-occ`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/end-group-occ`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ postProc })
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -296,11 +387,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Insert occurrence (C_InsertOcc)
         async insertOcc() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/insert-occ`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/insert-occ`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -309,11 +399,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Insert occurrence after current (C_InsertOccAfter)
         async insertOccAfter() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/insert-occ-after`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/insert-occ-after`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -322,11 +411,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Delete occurrence (C_DeleteOcc)
         async deleteOcc() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/delete-occ`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/delete-occ`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -335,12 +423,11 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         
         // Sort occurrences (C_SortOcc)
         async sortOcc(ascending = true) {
-            const response = await fetch(`/api/cspro/session/${sessionId}/sort-occ`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/sort-occ`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ascending })
-            });
-            const data = await response.json();
+            }));
             if (data.success && data.page) {
                 return data.page;
             }
@@ -384,11 +471,10 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
         // Maps to: C_IsNewCase, PartialSave
         
         async partialSave() {
-            const response = await fetch(`/api/cspro/session/${sessionId}/partial-save`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/partial-save`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
-            });
-            const data = await response.json();
+            }));
             console.log('[ServerProxy] partialSave response:', data);
             return data.success;
         },
@@ -433,12 +519,11 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
          */
         async invokeLogicFunction(functionName, args = {}) {
             console.log(`[ServerProxy] invokeLogicFunction: ${functionName}(${JSON.stringify(args)})`);
-            const response = await fetch(`/api/cspro/session/${sessionId}/invoke-function`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/invoke-function`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ functionName, arguments: args })
-            });
-            const data = await response.json();
+            }));
             console.log('[ServerProxy] invokeLogicFunction response:', data);
             return data;
         },
@@ -451,12 +536,11 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
          */
         async evalLogic(logicCode) {
             console.log(`[ServerProxy] evalLogic: ${logicCode}`);
-            const response = await fetch(`/api/cspro/session/${sessionId}/eval-logic`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/eval-logic`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ logic: logicCode })
-            });
-            const data = await response.json();
+            }));
             console.log('[ServerProxy] evalLogic response:', data);
             return data;
         },
@@ -470,16 +554,66 @@ export function createServerSideEngineProxy(componentOrBaseUrl, existingSessionI
          */
         async executeAction(actionName, args = {}, accessToken = '') {
             console.log(`[ServerProxy] executeAction: ${actionName}(${JSON.stringify(args)})`);
-            const response = await fetch(`/api/cspro/session/${sessionId}/action`, {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/action`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: actionName, arguments: args, accessToken })
-            });
-            const data = await response.json();
+            }));
             console.log('[ServerProxy] executeAction response:', data);
             return data;
         },
         
+        /**
+         * Invoke an action (alias for executeAction for compatibility)
+         * @param {string} actionName - Full action name (e.g., "Logic.getSymbolValue")
+         * @param {object} args - Arguments for the action
+         * @returns {Promise} Result from the action
+         */
+        async invokeAction(actionName, args = {}) {
+            console.log(`[ServerProxy] invokeAction: ${actionName}(${JSON.stringify(args)})`);
+            const data = await this.executeAction(actionName, args);
+            console.log(`[ServerProxy] invokeAction raw data:`, JSON.stringify(data));
+            
+            // For Logic.getSymbolValue, extract the actual field value
+            if (actionName === 'Logic.getSymbolValue' && data.success && data.result !== undefined) {
+                console.log(`[ServerProxy] invokeAction data.result:`, JSON.stringify(data.result));
+                console.log(`[ServerProxy] invokeAction data.result.alphaValue:`, data.result.alphaValue);
+                console.log(`[ServerProxy] invokeAction data.result.numericValue:`, data.result.numericValue);
+                
+                // Result has alphaValue and numericValue properties
+                // Return alphaValue if present (non-empty string), otherwise numericValue
+                if (data.result.alphaValue !== undefined && data.result.alphaValue !== null && data.result.alphaValue !== '') {
+                    console.log(`[ServerProxy] Returning alphaValue:`, data.result.alphaValue);
+                    return data.result.alphaValue;
+                }
+                if (data.result.numericValue !== undefined && data.result.numericValue !== null) {
+                    console.log(`[ServerProxy] Returning numericValue:`, data.result.numericValue);
+                    return data.result.numericValue;
+                }
+                console.log(`[ServerProxy] Returning full result:`, data.result);
+                return data.result;
+            }
+            return data;
+        },
+        
+        // ==================== SYNCHRONIZATION ====================
+        // Maps to: CRunAplEntry::RunSync
+        
+        async runSync(syncParams) {
+            const data = await handleResponse(fetch(`/api/cspro/session/${sessionId}/sync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ syncParams })
+            }));
+            return data.success;
+        },
+
+        async getSyncParameters() {
+            const response = await fetch(`/api/cspro/session/${sessionId}/sync-params`);
+            const data = await response.json();
+            return data.success ? data.syncParams : null;
+        },
+
         // ==================== SESSION UTILITIES ====================
         
         isSessionActive() {

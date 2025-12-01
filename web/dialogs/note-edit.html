@@ -10,25 +10,14 @@
     <link rel="stylesheet" href="/external/bootstrap/bootstrap-icons.css">
     <link rel="stylesheet" href="/css/dialogs.css">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
     <script>
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        // Create global CS instance - unified action-invoker handles environment detection
+        window.CS = new CSProActionInvoker('');
         
-        if (isWebMode) {
-            console.log('[note-edit] Running in web mode');
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            console.log('[note-edit] Running in native mode, loading action-invoker.js');
-            document.write('<script src="/action-invoker.js"><\/script>');
-        }
-    </script>
-    <script>
-        // After action invoker is loaded, initialize for web mode
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            window.CS = new CSProActionInvoker('');
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
             window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
         }
     </script>
@@ -75,9 +64,9 @@
     </script>
 
     <script>
-        // Initialize CS based on mode
+        // Initialize CS based on mode - use CSProEnvironment.isWebMode() from unified action-invoker.js
         let CS;
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
+        if (typeof CSProEnvironment !== 'undefined' && CSProEnvironment.isWebMode()) {
             CS = window.CS;
         } else {
             CS = new CSProActionInvoker("d8777e02e41e0c50e9ccbbd667e6d701");
@@ -203,8 +192,8 @@
     <div id="dialogDynamicContainer" style="position:fixed;top:0;"></div>
 
     <script>
-        // Initialize based on mode
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
+        // Initialize based on mode - use CSProEnvironment.isWebMode() from unified action-invoker.js
+        if (typeof CSProEnvironment !== 'undefined' && CSProEnvironment.isWebMode()) {
             // Listen for initialization message from parent via cspro-input-ready event
             window.addEventListener('cspro-input-ready', (event) => {
                 console.log('[note-edit] Received cspro-input-ready:', event.detail);
@@ -212,7 +201,7 @@
             });
             
             // Check if already initialized
-            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+            if (typeof CSProActionInvokerWebState !== 'undefined' && CSProActionInvokerWebState.initialized) {
                 initializeNoteEditDialog();
             }
             console.log('[note-edit] Sent cspro-dialog-ready to parent');

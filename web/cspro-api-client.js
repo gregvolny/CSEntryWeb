@@ -73,8 +73,9 @@ class CSProApiClient {
      * Load an application
      * @param {string} pffContent - PFF file content
      * @param {Object} files - Object mapping filename to content
+     * @param {string} appName - Application name (optional)
      */
-    async loadApplication(pffContent, files) {
+    async loadApplication(pffContent, files, appName = null) {
         if (!this.sessionId) {
             await this.createSession();
         }
@@ -97,7 +98,8 @@ class CSProApiClient {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 pffContent: pffContent,
-                files: processedFiles
+                files: processedFiles,
+                appName: appName
             })
         });
         

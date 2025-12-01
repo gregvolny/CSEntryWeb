@@ -3,6 +3,9 @@
  * @module components/csentry-mfc-view/styles
  */
 
+// Import tick mark styles from dedicated module
+import { getTickMarkStyles } from './tickMarks/styles.js';
+
 /**
  * Get complete styles for the MFC view component
  * @returns {string} CSS styles
@@ -20,6 +23,7 @@ export function getStyles() {
         ${getDialogStyles()}
         ${getStatusBarStyles()}
         ${getAppLoaderStyles()}
+        ${getTickMarkStyles()}
     `;
 }
 
@@ -267,6 +271,84 @@ function getTreeStyles() {
             padding: 4px 0;
         }
 
+        /* Case List View Styles */
+        .case-list-view {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .case-list-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .case-list-header {
+            padding: 4px 8px;
+            background: var(--mfc-btn-face);
+            border-bottom: 1px solid var(--mfc-border);
+            font-size: 11px;
+        }
+
+        .case-list-count {
+            color: #666;
+        }
+
+        .case-list-items {
+            flex: 1;
+            overflow-y: auto;
+            background: white;
+        }
+
+        .case-list-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 8px;
+            cursor: pointer;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 11px;
+            font-family: var(--mfc-font);
+            user-select: none;
+        }
+
+        .case-list-item:hover {
+            background: #e5f3ff;
+        }
+
+        .case-list-item:active {
+            background: var(--mfc-selection);
+            color: var(--mfc-selection-text);
+        }
+
+        .case-icon {
+            margin-right: 6px;
+            font-size: 14px;
+        }
+
+        .case-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .case-list-loading,
+        .case-list-empty,
+        .case-list-error {
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+            font-family: var(--mfc-font);
+        }
+
+        .case-list-error {
+            color: #d00;
+        }
+
         .tree-node {
             user-select: none;
         }
@@ -332,6 +414,35 @@ function getTreeStyles() {
 
         .tree-node.expanded > .tree-children {
             display: block;
+        }
+        
+        /* Case list tree styles */
+        .tree-case .tree-label {
+            cursor: pointer;
+        }
+        
+        .tree-case:hover .tree-label {
+            background: #e5f3ff;
+        }
+        
+        .tree-case.current-case .tree-label {
+            background: var(--mfc-selection);
+            color: var(--mfc-selection-text);
+        }
+        
+        .tree-adding-case .tree-label {
+            font-style: italic;
+            color: #666;
+        }
+        
+        .adding-case-node .tree-label {
+            display: flex;
+            align-items: center;
+        }
+        
+        .tree-checkbox {
+            margin-right: 4px;
+            font-size: 12px;
         }
 
         .mfc-splitter {
@@ -811,6 +922,7 @@ function getFieldStyles() {
 
         .form-text.bold { font-weight: bold; }
         .form-text.underline { text-decoration: underline; }
+        .form-text.italic { font-style: italic; }
 
         .form-box {
             position: absolute;
@@ -819,9 +931,13 @@ function getFieldStyles() {
             pointer-events: none;
         }
 
+        /* Field labels - text placed next to input fields */
         .form-field-label {
             position: absolute;
-            font-size: 11px;
+            font-family: 'MS Sans Serif', 'Segoe UI', Tahoma, sans-serif;
+            font-size: 13px;
+            white-space: nowrap;
+            color: #000000;
         }
 
         .form-field-input {
@@ -860,55 +976,29 @@ function getFieldStyles() {
             50% { background: #ffcccc; }
         }
 
-        /* Tickmark container */
+        /* Standalone field tickmark container - simple styling without tick marks for now */
         .form-field-tickmark-container {
             position: absolute;
-            display: flex;
-            align-items: flex-end;
-            pointer-events: none;
+            display: inline-block;
         }
         
         .form-field-tickmark-input {
-            position: relative;
+            position: absolute;
+            top: 0;
+            left: 0;
             font-family: 'Consolas', 'Courier New', monospace;
             font-size: 14px;
-            border: 2px inset #808080;
+            border: 1px solid #808080;
             padding: 2px 4px;
             outline: none;
-            background: var(--mfc-field-bg);
-            letter-spacing: 0;
-            z-index: 1;
+            background: #ffffff;
+            z-index: 2;
+            cursor: text;
         }
         
         .form-field-tickmark-input:focus {
             background: var(--mfc-field-current);
             border-color: #000080;
-            box-shadow: inset 0 0 0 1px #000080;
-        }
-        
-        .form-field-tickmarks {
-            position: absolute;
-            bottom: 2px;
-            left: 4px;
-            right: 4px;
-            height: 6px;
-            display: flex;
-            pointer-events: none;
-        }
-        
-        .tickmark-char {
-            flex: 1;
-            border-right: 1px solid #808080;
-            height: 100%;
-        }
-        
-        .tickmark-char:last-child {
-            border-right: none;
-        }
-        
-        .tickmark-decimal {
-            border-right: 1px solid #000080;
-            border-right-width: 2px;
         }
 
         /* Radio Button Group */
@@ -1034,7 +1124,7 @@ function getRosterStyles() {
         
         .roster-body td {
             padding: 2px;
-            border: 1px solid #ddd;
+            border: none;
             vertical-align: middle;
         }
         
@@ -1060,33 +1150,13 @@ function getRosterStyles() {
         .roster-field-container.current {
             background: #ffffcc;
         }
-        
-        /* Roster tick mark canvas - OVERLAY on input (MFC GridWnd.cpp behavior)
-         * z-index: 2 to appear ABOVE the input (z-index: 1)
-         * Transparent background so input text shows through */
-        .roster-tick-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            pointer-events: none;
-            z-index: 2;
-        }
-        
-        /* Checkbox tick canvas - same behavior */
-        .checkbox-tick-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            pointer-events: none;
-            z-index: 2;
-        }
-        
-        /* Roster cell input - transparent background to show tick marks */
+
+        /* Roster cell input - standard input styling */
         .roster-cell-input {
             position: relative;
             width: 100%;
-            border: 1px solid transparent;
-            background: transparent;
+            border: 1px solid #808080;
+            background: #ffffff;
             font-family: 'Consolas', monospace;
             font-size: 12px;
             padding: 2px 4px;
@@ -1095,31 +1165,48 @@ function getRosterStyles() {
             color: black;
         }
         
-        /* Input with tick marks needs transparent background */
-        .roster-cell-input.with-tick-marks {
-            background: transparent;
-            letter-spacing: 3px;  /* Space characters to align with tick marks */
-        }
-        
         .roster-cell-input:focus {
             border-color: var(--mfc-selection);
-            /* Keep transparent background so tick marks remain visible */
-            background: transparent;
+            background: var(--mfc-field-current);
         }
         
         .roster-cell-input.numeric {
             text-align: right;
         }
         
-        /* Legacy tick mark canvas styles (kept for backward compatibility) */
-        .tick-mark-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            pointer-events: none;
-            z-index: 0;
+        /* Roster ComboBox dropdown select */
+        .roster-dropdown-container {
+            display: inline-block;
+            vertical-align: top;
         }
         
+        .roster-cell-select {
+            width: 100%;
+            height: 20px;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            padding: 0 2px;
+            border: 1px solid #808080;
+            background: #ffffff;
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+        
+        .roster-cell-select:focus {
+            border-color: var(--mfc-selection);
+            background: var(--mfc-field-current);
+            outline: none;
+        }
+        
+        .roster-cell-select:disabled {
+            background: #f0f0f0;
+            cursor: not-allowed;
+        }
+        
+        .roster-cell-select.numeric {
+            text-align: right;
+        }
+
         /* Roster checkbox cell container */
         .roster-checkbox-container {
             display: flex;
@@ -1612,6 +1699,16 @@ function getAppLoaderStyles() {
         }
     `;
 }
+
+/**
+ * TICK MARK STYLES - MOVED TO DEDICATED MODULE
+ * 
+ * All tick mark CSS styles have been moved to:
+ *   ./tickMarks/styles.js
+ * 
+ * The getTickMarkStyles() function is now imported from the tickMarks module.
+ * See tickMarks/styles.js for the complete CSS and MFC rules documentation.
+ */
 
 export default getStyles;
 

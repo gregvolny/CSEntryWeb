@@ -10,36 +10,15 @@
     <link rel="stylesheet" href="/external/bootstrap/bootstrap-icons.css">
     <link rel="stylesheet" href="/css/dialogs.css">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
     <script>
-        // Detect web mode from URL parameter or iframe context
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        // Create global CS instance - unified action-invoker handles environment detection
+        window.CS = new CSProActionInvoker('');
         
-        if (isWebMode) {
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            // Native mode - load native action invoker
-            document.write('<script src="/action-invoker.js"><\/script>');
-        }
-    </script>
-    <script>
-        // After action invoker is loaded, initialize for web mode
-        // Wait for DOM to be ready before signaling
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            // Create global CS instance using web action invoker
-            if (typeof CSProActionInvoker !== 'undefined') {
-                window.CS = new CSProActionInvoker('');
-                // Signal ready to parent after a short delay to ensure everything is set up
-                setTimeout(function() {
-                    window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
-                    console.log('[errmsg] Sent cspro-dialog-ready to parent');
-                }, 50);
-            } else {
-                console.error('[errmsg] CSProActionInvoker not defined after loading action-invoker-web.js');
-            }
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
+            window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
         }
     </script>
     <script src="/external/jquery/jquery.min.js"></script>
@@ -87,7 +66,7 @@
             </div>
             <div class="row my-dialog-body" style="padding-top:12px;">
                 <div class="col withNewline" style="word-wrap:break-word;">
-                    {{message}}
+                    {{#messageNumber}}<strong>{{messageNumber}}:</strong> {{/messageNumber}}{{message}}
                 </div>
             </div>
             <div class="row text-end my-dialog-footer">
@@ -260,6 +239,15 @@
         function initializeDialog(inputData) {
             window.input = inputData || {};
             
+            // Extract message number from message if in "0020: Message text" format
+            if (input.message && typeof input.message === 'string') {
+                var match = input.message.match(/^(\d{4}):\s*/);
+                if (match) {
+                    input.messageNumber = match[1];
+                    input.message = input.message.substring(match[0].length);
+                }
+            }
+            
             // Ensure buttons array exists with default OK button
             if (!Array.isArray(input.buttons) || input.buttons.length === 0) {
                 input.buttons = [
@@ -305,14 +293,15 @@
             }, 50);
         }
         
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
+        // Use CSProEnvironment.isWebMode() from unified action-invoker.js
+        if (typeof CSProEnvironment !== 'undefined' && CSProEnvironment.isWebMode()) {
             // Web mode - wait for data from parent via cspro-input-ready event
             window.addEventListener('cspro-input-ready', function(event) {
                 var input = event.detail?.inputData || CS.UI.getInputData() || {};
                 initializeDialog(input);
             });
             // Also check if already initialized
-            if (typeof CSProActionInvokerState !== 'undefined' && CSProActionInvokerState.initialized) {
+            if (typeof CSProActionInvokerWebState !== 'undefined' && CSProActionInvokerWebState.initialized) {
                 initializeDialog(CS.UI.getInputData() || {});
             }
         } else {

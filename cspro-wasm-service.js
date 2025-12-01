@@ -20,9 +20,14 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { v4 as uuidv4 } from 'uuid';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Async context to track the current session during WASM execution
+const sessionContext = new AsyncLocalStorage();
 
 class CSProWasmService {
     constructor() {
@@ -62,48 +67,83 @@ class CSProWasmService {
                     } catch (e) {
                         console.warn('[CSProWasmService] Could not parse dialog input:', e);
                     }
-                    
-                    // Store dialog info for client display (informational)
-                    const dialogInfo = {
-                        dialogName,
-                        inputData,
-                        timestamp: Date.now(),
-                        autoAcknowledged: true
-                    };
-                    
-                    // Add to pending dialogs for the current session
-                    // Note: We don't have session context here, so store globally
-                    // This will be retrieved by the next API response
-                    if (!self._lastDialogs) self._lastDialogs = [];
-                    self._lastDialogs.push(dialogInfo);
-                    // Keep only last 10 dialogs
-                    if (self._lastDialogs.length > 10) {
-                        self._lastDialogs.shift();
-                    }
-                    
-                    // Handle errmsg dialogs - just acknowledge them server-side
-                    // The actual display will happen on the client
-                    // WASM expects { index: N } directly (extracted from CS.UI.closeDialog({ result: { index: N } }))
-                    if (dialogName === 'errmsg') {
-                        console.log(`[CSProWasmService] Error message: ${inputData.message}`);
-                        // Return index 1 (OK button) - matches errmsg.html format
+
+                    // Get current session from context
+                    const sessionId = sessionContext.getStore();
+                    if (!sessionId) {
+                        console.warn('[CSProWasmService] Dialog requested outside of session context!');
+                        // Fallback for non-session context (should not happen in normal flow)
                         return JSON.stringify({ index: 1 });
                     }
-                    
-                    // Handle select dialogs (value set selection)
-                    if (dialogName === 'select') {
-                        console.log(`[CSProWasmService] Select dialog - storing for client`);
-                        // Return empty/cancel - the client will handle the actual selection
-                        return JSON.stringify({ cancelled: true });
+
+                    const session = self.getSession(sessionId);
+                    if (!session) {
+                        console.warn(`[CSProWasmService] Session ${sessionId} not found during dialog request`);
+                        return JSON.stringify({ index: 1 });
                     }
-                    
-                    // For other dialogs, return a default response
-                    return JSON.stringify({ index: 1 });
+
+                    // Create a promise that will be resolved when the client responds
+                    // This suspends the WASM execution (via JSPI)
+                    return new Promise((resolve, reject) => {
+                        // Store the resolver so we can call it later
+                        session.pendingDialogResolver = resolve;
+                        
+                        // Notify the controller that we are suspended on a dialog
+                        if (session.dialogSignal) {
+                            session.dialogSignal({
+                                dialogName,
+                                inputData,
+                                timestamp: Date.now()
+                            });
+                        } else {
+                            console.error('[CSProWasmService] No dialog signal handler found for session');
+                            // If we can't signal, we must resolve immediately to avoid hanging
+                            resolve(JSON.stringify({ index: 1 }));
+                        }
+                    });
                 }
             };
             
             // Also set on global for compatibility
             global.CSProDialogHandler = globalThis.CSProDialogHandler;
+
+            // Define alert for Node.js environment to prevent crashes in CSPro.js
+            if (typeof globalThis.alert === 'undefined') {
+                globalThis.alert = (msg) => console.log('[Alert]', msg);
+                global.alert = globalThis.alert;
+            }
+
+            // Mock window for Node.js environment to satisfy Emscripten/CSPro.js dependencies
+            if (typeof globalThis.window === 'undefined') {
+                globalThis.window = globalThis;
+                global.window = globalThis;
+                
+                // Mock location to prevent crash in loadPackage
+                globalThis.location = {
+                    pathname: '/server-side-wasm/',
+                    href: 'file:///server-side-wasm/'
+                };
+                globalThis.window.location = globalThis.location;
+            }
+
+            // Set up CSProActionInvoker for server-side logic functions (getos, getdeviceid, etc.)
+            globalThis.CSProActionInvoker = {
+                System: {
+                    getOS: () => "Windows", // Return "Windows" to see if it bypasses sync logic
+                    getDeviceId: () => {
+                        // Return a persistent server ID or session-based ID
+                        // For server-side execution, we can use a fixed ID or generate one
+                        return "ServerSideWASM";
+                    },
+                    getUUID: () => uuidv4()
+                },
+                // Add other namespaces as needed
+                UI: {
+                    alert: (args) => console.log('[CSProActionInvoker] UI.alert:', args),
+                    showDialog: (args) => console.log('[CSProActionInvoker] UI.showDialog:', args)
+                }
+            };
+            global.CSProActionInvoker = globalThis.CSProActionInvoker;
             
             // Load the CSPro.js module
             const csproJsPath = path.join(this.wasmPath, 'CSPro.js');
@@ -165,7 +205,7 @@ class CSProWasmService {
             console.log('[CSProWasmService] Creating CSProEngine instance...');
             engine = new this.Module.CSProEngine();
             console.log('[CSProWasmService] CSProEngine instance created:', typeof engine);
-            console.log('[CSProWasmService] Engine methods:', Object.keys(engine.__proto__ || {}).slice(0, 10));
+            console.log('[CSProWasmService] ALL Engine methods:', Object.keys(engine.__proto__ || {}));
         } catch (err) {
             console.error('[CSProWasmService] Failed to create CSProEngine:', err);
             throw err;
@@ -181,13 +221,111 @@ class CSProWasmService {
             rawEngine: engine,
             applicationLoaded: false,
             entryStarted: false,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            pendingDialogResolver: null,
+            dialogSignal: null,
+            activeWasmPromise: null
         };
 
         this.sessions.set(sessionId, session);
         console.log(`[CSProWasmService] Session created successfully: ${sessionId}`);
         
         return session;
+    }
+
+    /**
+     * Execute a WASM action with support for suspending on dialogs
+     * @param {string} sessionId - The session ID
+     * @param {Function} actionFn - Async function that executes the WASM operation
+     * @returns {Promise<object>} Result object { status: 'success'|'dialog', result?, dialog? }
+     */
+    async executeWasmWithDialogHandling(sessionId, actionFn) {
+        const session = this.getSession(sessionId);
+        if (!session) {
+            throw new Error(`Session not found: ${sessionId}`);
+        }
+
+        // Run within the session context so CSProDialogHandler can find the session
+        return sessionContext.run(sessionId, async () => {
+            // Create a signal promise that resolves when a dialog is requested
+            let dialogResolver;
+            const dialogSignal = new Promise(resolve => { dialogResolver = resolve; });
+            session.dialogSignal = dialogResolver;
+
+            try {
+                // Start the WASM operation
+                // If we are resuming a suspended operation, actionFn should just await the existing promise
+                const wasmPromise = actionFn();
+                
+                // Store the promise so we can await it later if we suspend
+                session.activeWasmPromise = wasmPromise;
+
+                // Race the WASM completion against the dialog signal
+                const winner = await Promise.race([
+                    wasmPromise.then(res => ({ type: 'complete', result: res })),
+                    dialogSignal.then(data => ({ type: 'dialog', data: data }))
+                ]);
+
+                if (winner.type === 'dialog') {
+                    console.log(`[CSProWasmService] Suspended on dialog: ${winner.data.dialogName}`);
+                    return { 
+                        status: 'dialog', 
+                        dialog: winner.data 
+                    };
+                } else {
+                    console.log(`[CSProWasmService] Operation completed successfully`);
+                    // Clear session state
+                    session.activeWasmPromise = null;
+                    session.pendingDialogResolver = null;
+                    session.dialogSignal = null;
+                    
+                    return { 
+                        status: 'success', 
+                        result: winner.result 
+                    };
+                }
+            } catch (error) {
+                console.error(`[CSProWasmService] Error in WASM execution:`, error);
+                session.activeWasmPromise = null;
+                session.pendingDialogResolver = null;
+                session.dialogSignal = null;
+                throw error;
+            }
+        });
+    }
+
+    /**
+     * Submit a response to a pending dialog
+     * @param {string} sessionId - The session ID
+     * @param {object} response - The dialog response (e.g. { textInput: "..." })
+     */
+    async submitDialogResponse(sessionId, response) {
+        const session = this.getSession(sessionId);
+        if (!session) {
+            throw new Error(`Session not found: ${sessionId}`);
+        }
+
+        if (!session.pendingDialogResolver) {
+            throw new Error('No pending dialog for this session');
+        }
+
+        console.log(`[CSProWasmService] Submitting dialog response for session ${sessionId}:`, response);
+
+        // Resume the WASM execution by resolving the dialog promise
+        // The response must be a JSON string as expected by WASM
+        const responseJson = JSON.stringify(response);
+        session.pendingDialogResolver(responseJson);
+        
+        // Clear the resolver (it's been used)
+        session.pendingDialogResolver = null;
+
+        // Now wait for the WASM engine to continue (until next dialog or completion)
+        // We reuse the existing active promise
+        if (!session.activeWasmPromise) {
+            throw new Error('No active WASM execution to resume');
+        }
+
+        return this.executeWasmWithDialogHandling(sessionId, () => session.activeWasmPromise);
     }
     
     /**
@@ -257,13 +395,16 @@ class CSProWasmService {
     /**
      * Load an application for a session (files provided via request)
      */
-    async loadApplication(sessionId, pffContent, applicationFiles) {
+    async loadApplication(sessionId, pffContent, applicationFiles, appName = null) {
         const session = this.getSession(sessionId);
         if (!session) {
             throw new Error(`Session not found: ${sessionId}`);
         }
 
         try {
+            // Store appName for file synchronization
+            session.appName = appName;
+            
             // Write files to WASM filesystem
             const FS = this.Module.FS;
             const appDir = `/sessions/${sessionId}`;
@@ -271,7 +412,10 @@ class CSProWasmService {
             // Create session directory
             this._ensureDirectory(FS, appDir);
 
-            // Write all application files
+            // Find the .pen file to determine the application directory
+            let penFilePath = null;
+            
+            // Write all application files and find the .pen file
             for (const [filename, content] of Object.entries(applicationFiles)) {
                 const filePath = `${appDir}/${filename}`;
                 this._ensureDirectory(FS, path.dirname(filePath).replace(/\\/g, '/'));
@@ -287,17 +431,139 @@ class CSProWasmService {
                     FS.writeFile(filePath, content);
                 }
                 console.log(`[CSProWasmService] Wrote file: ${filePath}`);
+                
+                // Track the .pen file location (but not Login.pen or Menu.pen)
+                if (filename.endsWith('.pen') && !filename.includes('Login') && !filename.includes('Menu')) {
+                    penFilePath = filePath;
+                }
             }
-
-            // Write PFF content
-            const pffPath = `${appDir}/application.pff`;
-            FS.writeFile(pffPath, pffContent);
-
-            // Use Embind CSProEngine.initApplication()
-            const result = session.engine.initApplication(pffPath);
             
-            session.applicationLoaded = result;
-            session.appDir = appDir;
+            // Restore existing data from server disk if available
+            // This ensures we use the persisted data instead of empty files from the client
+            if (appName) {
+                session.appDir = appDir; // Ensure appDir is set for sync
+                this._syncFilesFromDisk(session);
+            }
+            
+            console.log(`[CSProWasmService] Found .pen file: ${penFilePath}`);
+
+            // Process PFF content - convert ALL relative paths to absolute WASM filesystem paths
+            let processedPff = pffContent;
+            
+            // Determine the working directory for the application
+            // Heuristic: Try to match PFF Application path with actual .pen file location
+            let workingDir = appDir;
+            
+            if (penFilePath) {
+                const appMatch = pffContent.match(/^Application=(.*)$/m);
+                if (appMatch) {
+                    let pffAppPath = appMatch[1].trim().replace(/\\/g, '/');
+                    // Strip leading ./
+                    if (pffAppPath.startsWith('./')) pffAppPath = pffAppPath.substring(2);
+                    
+                    // Check if penFilePath ends with pffAppPath
+                    // e.g. penFilePath = /sess/Source/App.pen, pffAppPath = Source/App.pen
+                    if (penFilePath.endsWith(pffAppPath)) {
+                        const suffixLen = pffAppPath.length;
+                        const prefixLen = penFilePath.length - suffixLen;
+                        // Check for slash separator or exact match
+                        if (prefixLen > 0 && penFilePath[prefixLen-1] === '/') {
+                             workingDir = penFilePath.substring(0, prefixLen - 1);
+                        } else if (prefixLen === 0) {
+                             // Exact match (unlikely as penFilePath is absolute)
+                        }
+                        console.log(`[CSProWasmService] Deduced workingDir from PFF path: ${workingDir}`);
+                    } else {
+                        // Fallback: If pffAppPath is just filename, put PFF in same dir as PEN
+                        const pffAppName = pffAppPath.split('/').pop();
+                        const penFileName = penFilePath.split('/').pop();
+                        
+                        if (pffAppName === penFileName) {
+                            workingDir = path.dirname(penFilePath).replace(/\\/g, '/');
+                            console.log(`[CSProWasmService] Deduced workingDir (colocated): ${workingDir}`);
+                        }
+                    }
+                }
+            }
+            
+            // Replace ALL path-like entries with absolute paths
+            // This handles: Application, InputData, OutputData, ExternalFiles, Paradata, OnExit, etc.
+            const pathKeys = ['Application', 'AppFile', 'InputData', 'OutputData', 'ExternalFiles', 'Paradata', 'OnExit', 'CommonStore', 'ParadataConcat'];
+            
+            for (const key of pathKeys) {
+                // Pattern: Key=.\path or Key=..\path or Key=path (relative)
+                const regex = new RegExp(`^(${key})=([^\\/\\r\\n][^\\r\\n]*)$`, 'gm');
+                processedPff = processedPff.replace(regex, (match, keyName, pathValue) => {
+                    // Skip if already absolute (starts with /)
+                    if (pathValue.startsWith('/')) {
+                        return match;
+                    }
+
+                    // Skip if starts with | (CSPro special flags like |type=None)
+                    if (pathValue.startsWith('|')) {
+                        return match;
+                    }
+                    
+                    // Convert Windows backslashes to forward slashes
+                    let normalizedPath = pathValue.replace(/\\/g, '/');
+                    
+                    // Handle relative paths
+                    if (normalizedPath.startsWith('../')) {
+                        // Parent directory reference - resolve from workingDir
+                        const parts = normalizedPath.split('/');
+                        let currentDir = workingDir;
+                        while (parts[0] === '..') {
+                            parts.shift();
+                            currentDir = path.dirname(currentDir);
+                        }
+                        normalizedPath = currentDir + '/' + parts.join('/');
+                    } else if (normalizedPath.startsWith('./')) {
+                        // Current directory reference
+                        normalizedPath = workingDir + '/' + normalizedPath.substring(2);
+                    } else {
+                        // No prefix - relative to working directory
+                        normalizedPath = workingDir + '/' + normalizedPath;
+                    }
+                    
+                    console.log(`[CSProWasmService] Rewriting ${keyName}: ${pathValue} -> ${normalizedPath}`);
+                    return `${keyName}=${normalizedPath}`;
+                });
+            }
+            
+            console.log(`[CSProWasmService] Processed PFF content:\n${processedPff.substring(0, 800)}...`);
+
+            // Write processed PFF content to the application subdirectory (same as .pen file)
+            const pffPath = `${workingDir}/application.pff`;
+            this._ensureDirectory(FS, workingDir);
+            FS.writeFile(pffPath, processedPff);
+            console.log(`[CSProWasmService] Wrote PFF to: ${pffPath}`);
+
+            // Use Embind CSProEngine.initApplication() via the dialog handler wrapper
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result;
+                const initResult = session.engine.initApplication(pffPath);
+                
+                // Check if it's a promise (JSPI-wrapped function)
+                if (initResult && typeof initResult.then === 'function') {
+                    console.log(`[CSProWasmService] initApplication returned a promise, awaiting...`);
+                    result = await initResult;
+                } else {
+                    result = initResult;
+                }
+
+                // Update session state immediately upon completion (even if resumed later)
+                console.log(`[CSProWasmService] initApplication returned: ${result}`);
+                session.applicationLoaded = result;
+                session.appDir = appDir;
+                session.workingDir = workingDir;
+
+                return result;
+            });
+            
+            // If suspended on dialog, return the dialog info
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
             
             return {
                 success: session.applicationLoaded,
@@ -322,23 +588,30 @@ class CSProWasmService {
         try {
             console.log(`[CSProWasmService] Loading embedded application: ${pffPath}`);
             
-            // Use Embind CSProEngine.initApplication()
-            // With JSPI, this may be an async function that returns a promise
-            let result;
-            const initResult = session.engine.initApplication(pffPath);
-            
-            // Check if it's a promise (JSPI-wrapped function)
-            if (initResult && typeof initResult.then === 'function') {
-                console.log(`[CSProWasmService] initApplication returned a promise, awaiting...`);
-                result = await initResult;
-            } else {
-                result = initResult;
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                // Use Embind CSProEngine.initApplication()
+                // With JSPI, this may be an async function that returns a promise
+                let result;
+                const initResult = session.engine.initApplication(pffPath);
+                
+                // Check if it's a promise (JSPI-wrapped function)
+                if (initResult && typeof initResult.then === 'function') {
+                    console.log(`[CSProWasmService] initApplication returned a promise, awaiting...`);
+                    result = await initResult;
+                } else {
+                    result = initResult;
+                }
+                
+                session.applicationLoaded = result;
+                session.appDir = pffPath.substring(0, pffPath.lastIndexOf('/'));
+                console.log(`[CSProWasmService] initApplication returned: ${result}`);
+                
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
             }
-            
-            session.applicationLoaded = result;
-            session.appDir = pffPath.substring(0, pffPath.lastIndexOf('/'));
-            
-            console.log(`[CSProWasmService] initApplication returned: ${result}`);
             
             return {
                 success: session.applicationLoaded,
@@ -364,18 +637,24 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.start()
-            // With JSPI, this is now marked async() and returns a Promise
-            const startResult = session.engine.start();
-            let result;
-            if (startResult && typeof startResult.then === 'function') {
-                console.log(`[CSProWasmService] start() returned a promise, awaiting...`);
-                result = await startResult;
-            } else {
-                result = startResult;
+            // Use Embind CSProEngine.start() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                const startResult = session.engine.start();
+                let result;
+                if (startResult && typeof startResult.then === 'function') {
+                    console.log(`[CSProWasmService] start() returned a promise, awaiting...`);
+                    result = await startResult;
+                } else {
+                    result = startResult;
+                }
+                
+                session.entryStarted = result;
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
             }
-            
-            session.entryStarted = result;
             
             return {
                 success: session.entryStarted,
@@ -398,10 +677,82 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.getCurrentPage() - returns JS object directly
-            const page = session.engine.getCurrentPage();
+            let page = session.engine.getCurrentPage();
+            if (page && typeof page.then === 'function') {
+                page = await page;
+            }
             return page;
         } catch (error) {
             console.error(`[CSProWasmService] getCurrentPage error:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Get list of all cases in data file
+     * Maps to: GetSequentialCaseIds (WASM)
+     */
+    async getSequentialCaseIds(sessionId) {
+        const session = this.getSession(sessionId);
+        if (!session || !session.engine) {
+            throw new Error('No engine in session');
+        }
+
+        try {
+            // Call WASM getSequentialCaseIds
+            let cases = session.engine.getSequentialCaseIds();
+            if (cases && typeof cases.then === 'function') {
+                cases = await cases;
+            }
+            
+            // Convert to array format
+            let casesArray = [];
+            if (cases) {
+                const length = cases.length || 0;
+                for (let i = 0; i < length; i++) {
+                    const c = cases[i];
+                    casesArray.push({
+                        key: c.ids || '',  // WASM uses 'ids' field
+                        label: c.label || '',
+                        position: c.position || 0
+                    });
+                }
+            }
+            
+            return casesArray;
+        } catch (error) {
+            console.error(`[CSProWasmService] getSequentialCaseIds error:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Modify (open) a case by position
+     * Maps to: ModifyCase (WASM)
+     */
+    async modifyCase(sessionId, position) {
+        const session = this.getSession(sessionId);
+        if (!session || !session.engine) {
+            throw new Error('No engine in session');
+        }
+
+        try {
+            console.log(`[CSProWasmService] modifyCase: position=${position}`);
+            
+            // Call WASM modifyCase
+            let result = session.engine.modifyCase(position);
+            if (result && typeof result.then === 'function') {
+                result = await result;
+            }
+            
+            // Mark entry as started if successful
+            if (result) {
+                session.entryStarted = true;
+            }
+            
+            return result;
+        } catch (error) {
+            console.error(`[CSProWasmService] modifyCase error:`, error);
             throw error;
         }
     }
@@ -431,9 +782,35 @@ class CSProWasmService {
             // Clear pending dialogs before operation
             this._lastDialogs = [];
             
-            // Use Embind CSProEngine.setFieldValueAndAdvance()
-            const result = session.engine.setFieldValueAndAdvance(valueStr);
+            // Use Embind CSProEngine.setFieldValueAndAdvance() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.setFieldValueAndAdvance(valueStr);
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
             
+            const result = executionResult.result;
+            
+            // Auto-save after every field advance to ensure data persistence
+            // This is critical for web clients where sessions might be disconnected
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during advanceField:', saveError);
+            }
+
             // Get any dialogs that were shown during the operation
             const pendingDialogs = this.getAndClearPendingDialogs();
             
@@ -458,8 +835,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.previousField()
-            const result = session.engine.previousField();
+            // Use Embind CSProEngine.previousField() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.previousField();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during previousField:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] previousField error:`, error);
@@ -478,7 +881,10 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.getFormData()
-            const formData = session.engine.getFormData();
+            let formData = session.engine.getFormData();
+            if (formData && typeof formData.then === 'function') {
+                formData = await formData;
+            }
             return formData;
         } catch (error) {
             console.error(`[CSProWasmService] getFormData error:`, error);
@@ -497,7 +903,10 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.getQuestionText()
-            const result = session.engine.getQuestionText();
+            let result = session.engine.getQuestionText();
+            if (result && typeof result.then === 'function') {
+                result = await result;
+            }
             return result || { questionText: '' };
         } catch (error) {
             console.error(`[CSProWasmService] getQuestionText error:`, error);
@@ -516,7 +925,11 @@ class CSProWasmService {
 
         try {
             // Responses are included in getCurrentPage
-            const page = session.engine.getCurrentPage();
+            let page = session.engine.getCurrentPage();
+            if (page && typeof page.then === 'function') {
+                page = await page;
+            }
+            
             if (page && page.fields && page.fields.length > 0) {
                 return page.fields[0].responses || [];
             }
@@ -538,8 +951,17 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.onStop()
-            session.engine.onStop();
+            const result = session.engine.onStop();
+            if (result && typeof result.then === 'function') {
+                await result;
+            }
+            
             session.entryStarted = false;
+            
+            // Sync files back to disk if appName is known
+            if (save && session.appName) {
+                this._syncFilesToDisk(session);
+            }
             
             return { success: true };
         } catch (error) {
@@ -558,8 +980,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.endGroup()
-            const result = session.engine.endGroup();
+            // Use Embind CSProEngine.endGroup() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.endGroup();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during endGroup:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] endGroup error:`, error);
@@ -577,8 +1025,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.endLevel()
-            const result = session.engine.endLevel();
+            // Use Embind CSProEngine.endLevel() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.endLevel();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during endLevel:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] endLevel error:`, error);
@@ -597,8 +1071,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.endLevelOcc()
-            const result = session.engine.endLevelOcc();
+            // Use Embind CSProEngine.endLevelOcc() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.endLevelOcc();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during endLevelOcc:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] endLevelOcc error:`, error);
@@ -619,7 +1119,33 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.endGroup() - roster end uses same engine call
-            const result = session.engine.endGroup();
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.endGroup();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during endRoster:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] endRoster error:`, error);
@@ -638,11 +1164,83 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.insertOcc()
-            const result = session.engine.insertOcc();
+            // Use Embind CSProEngine.insertOcc() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.insertOcc();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during insertOcc:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] insertOcc error:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Insert occurrence after current in a roster/repeating group
+     * Maps to MFC C_InsertOccAfter() / Embind CSProEngine.insertOccAfter()
+     */
+    async insertOccAfter(sessionId) {
+        const session = this.getSession(sessionId);
+        if (!session || !session.entryStarted) {
+            throw new Error('Entry not started');
+        }
+
+        try {
+            // Use Embind CSProEngine.insertOccAfter() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.insertOccAfter();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during insertOccAfter:', saveError);
+            }
+
+            return { success: true, page: result };
+        } catch (error) {
+            console.error(`[CSProWasmService] insertOccAfter error:`, error);
             throw error;
         }
     }
@@ -658,8 +1256,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.deleteOcc()
-            const result = session.engine.deleteOcc();
+            // Use Embind CSProEngine.deleteOcc() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.deleteOcc();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during deleteOcc:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] deleteOcc error:`, error);
@@ -678,8 +1302,34 @@ class CSProWasmService {
         }
 
         try {
-            // Use Embind CSProEngine.sortOcc()
-            const result = session.engine.sortOcc();
+            // Use Embind CSProEngine.sortOcc() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let result = session.engine.sortOcc();
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during sortOcc:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] sortOcc error:`, error);
@@ -691,16 +1341,88 @@ class CSProWasmService {
      * Go to a specific field by name
      * Maps to MFC C_MoveToField() / Embind CSProEngine.goToField()
      * @param {string} fieldName - The name of the field to navigate to
+     * @param {number} occurrence1 - First occurrence index (default 1)
+     * @param {number} occurrence2 - Second occurrence index (default 0)
+     * @param {number} occurrence3 - Third occurrence index (default 0)
      */
-    async goToField(sessionId, fieldName) {
+    async goToField(sessionId, fieldNameOrSymbol, occurrence1 = 1, occurrence2 = 0, occurrence3 = 0) {
         const session = this.getSession(sessionId);
         if (!session || !session.entryStarted) {
             throw new Error('Entry not started');
         }
 
+        console.log('[CSProWasmService] goToField called with:', { fieldNameOrSymbol, occurrence1, occurrence2, occurrence3 });
+
         try {
-            // Use Embind CSProEngine.goToField()
-            const result = session.engine.goToField(fieldName);
+            // Convert field name to field symbol if needed
+            let fieldSymbol = fieldNameOrSymbol;
+            if (typeof fieldNameOrSymbol === 'string') {
+                // Get form data to access all fields (not just current page)
+                let formData = session.engine.getFormData();
+                if (formData && typeof formData.then === 'function') {
+                    formData = await formData;
+                }
+                
+                if (formData && formData.fields) {
+                    const field = formData.fields.find(f => 
+                        f.name && f.name.toUpperCase() === fieldNameOrSymbol.toUpperCase()
+                    );
+                    if (field && field.symbol !== undefined) {
+                        fieldSymbol = field.symbol;
+                        console.log('[CSProWasmService] Resolved field name', fieldNameOrSymbol, 'to symbol', fieldSymbol, 'from form data');
+                    } else {
+                        console.warn('[CSProWasmService] Field not found in form data:', fieldNameOrSymbol);
+                        
+                        // Fallback: Try current page
+                        let currentPage = session.engine.getCurrentPage();
+                        if (currentPage && typeof currentPage.then === 'function') {
+                            currentPage = await currentPage;
+                        }
+                        
+                        if (currentPage && currentPage.fields) {
+                            const pageField = currentPage.fields.find(f => 
+                                f.name && f.name.toUpperCase() === fieldNameOrSymbol.toUpperCase()
+                            );
+                            if (pageField && pageField.symbol !== undefined) {
+                                fieldSymbol = pageField.symbol;
+                                console.log('[CSProWasmService] Resolved field name', fieldNameOrSymbol, 'to symbol', fieldSymbol, 'from current page');
+                            }
+                        }
+                    }
+                } else {
+                    console.warn('[CSProWasmService] Form data not available or has no fields');
+                }
+            }
+
+            // Use Embind CSProEngine.goToField() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                console.log('[CSProWasmService] Calling engine.goToField with symbol:', fieldSymbol, 'occurrences:', occurrence1, occurrence2, occurrence3);
+                let result = session.engine.goToField(fieldSymbol, occurrence1, occurrence2, occurrence3);
+                if (result && typeof result.then === 'function') {
+                    result = await result;
+                }
+                return result;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const result = executionResult.result;
+
+            // Auto-save
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during goToField:', saveError);
+            }
+
             return { success: true, page: result };
         } catch (error) {
             console.error(`[CSProWasmService] goToField error:`, error);
@@ -719,7 +1441,10 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.getCaseTree()
-            const caseTree = session.engine.getCaseTree();
+            let caseTree = session.engine.getCaseTree();
+            if (caseTree && typeof caseTree.then === 'function') {
+                caseTree = await caseTree;
+            }
             return caseTree;
         } catch (error) {
             console.error(`[CSProWasmService] getCaseTree error:`, error);
@@ -739,8 +1464,18 @@ class CSProWasmService {
 
         try {
             // Use Embind CSProEngine.partialSave()
-            const result = session.engine.partialSave();
+            let result = session.engine.partialSave();
+            if (result && typeof result.then === 'function') {
+                result = await result;
+            }
+            
             console.log(`[CSProWasmService] partialSave result:`, result);
+            
+            // Sync files back to disk if appName is known
+            if (result && session.appName) {
+                this._syncFilesToDisk(session);
+            }
+            
             return result;
         } catch (error) {
             console.error(`[CSProWasmService] partialSave error:`, error);
@@ -760,7 +1495,10 @@ class CSProWasmService {
      */
     async invokeLogicFunction(sessionId, functionName, args = {}) {
         const session = this.getSession(sessionId);
-        if (!session || !session.entryStarted) {
+        if (!session) {
+            throw new Error('Session not found');
+        }
+        if (!session.entryStarted) {
             throw new Error('Entry not started');
         }
 
@@ -770,10 +1508,21 @@ class CSProWasmService {
         this._lastDialogs = [];
         
         try {
-            // Use Embind CSProEngine.invokeLogicFunction()
-            const argsJson = typeof args === 'string' ? args : JSON.stringify(args);
-            const resultJson = await session.engine.invokeLogicFunction(functionName, argsJson);
-            
+            // Use Embind CSProEngine.invokeLogicFunction() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                const argsJson = typeof args === 'string' ? args : JSON.stringify(args);
+                let resultJson = session.engine.invokeLogicFunction(functionName, argsJson);
+                if (resultJson && typeof resultJson.then === 'function') {
+                    resultJson = await resultJson;
+                }
+                return resultJson;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const resultJson = executionResult.result;
             console.log(`[CSProWasmService] invokeLogicFunction result:`, resultJson);
             
             // Parse result if it's a JSON string
@@ -784,10 +1533,26 @@ class CSProWasmService {
                 result = resultJson;
             }
             
+            // Auto-save after logic execution (as it might have modified data)
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during invokeLogicFunction:', saveError);
+            }
+
             // Get updated page after logic execution (may have navigated or shown dialogs)
-            const page = await session.engine.getCurrentPage();
+            let page = session.engine.getCurrentPage();
+            if (page && typeof page.then === 'function') {
+                page = await page;
+            }
             
-            // Collect any dialogs that occurred during execution
+            // Collect any dialogs that occurred during execution (legacy check)
             const dialogs = this._lastDialogs ? [...this._lastDialogs] : [];
             this._lastDialogs = []; // Clear after collecting
             
@@ -811,7 +1576,10 @@ class CSProWasmService {
      */
     async evalLogic(sessionId, logicCode) {
         const session = this.getSession(sessionId);
-        if (!session || !session.entryStarted) {
+        if (!session) {
+            throw new Error('Session not found');
+        }
+        if (!session.entryStarted) {
             throw new Error('Entry not started');
         }
 
@@ -821,9 +1589,20 @@ class CSProWasmService {
         this._lastDialogs = [];
         
         try {
-            // Use Embind CSProEngine.evalLogic()
-            const resultJson = await session.engine.evalLogic(logicCode);
-            
+            // Use Embind CSProEngine.evalLogic() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                let resultJson = session.engine.evalLogic(logicCode);
+                if (resultJson && typeof resultJson.then === 'function') {
+                    resultJson = await resultJson;
+                }
+                return resultJson;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const resultJson = executionResult.result;
             console.log(`[CSProWasmService] evalLogic result:`, resultJson);
             
             // Parse result if it's a JSON string
@@ -834,8 +1613,24 @@ class CSProWasmService {
                 result = resultJson;
             }
             
+            // Auto-save after logic execution
+            try {
+                let saveResult = session.engine.partialSave();
+                if (saveResult && typeof saveResult.then === 'function') {
+                    await saveResult;
+                }
+                if (session.appName) {
+                    this._syncFilesToDisk(session);
+                }
+            } catch (saveError) {
+                console.warn('[CSProWasmService] Auto-save failed during evalLogic:', saveError);
+            }
+
             // Get updated page after logic execution (may have navigated or shown dialogs)
-            const page = await session.engine.getCurrentPage();
+            let page = session.engine.getCurrentPage();
+            if (page && typeof page.then === 'function') {
+                page = await page;
+            }
             
             // Collect any dialogs that occurred during execution
             const dialogs = this._lastDialogs ? [...this._lastDialogs] : [];
@@ -869,10 +1664,18 @@ class CSProWasmService {
         console.log(`[CSProWasmService] executeAction: ${actionName}(${JSON.stringify(args)})`);
         
         try {
-            // Use Embind CSProEngine.processAction()
-            const argsJson = typeof args === 'string' ? args : JSON.stringify(args);
-            const resultJson = await session.engine.processAction(actionName, argsJson);
-            
+            // Use Embind CSProEngine.processAction() via dialog handler
+            const executionResult = await this.executeWasmWithDialogHandling(sessionId, async () => {
+                const argsJson = typeof args === 'string' ? args : JSON.stringify(args);
+                const resultJson = await session.engine.processAction(actionName, argsJson);
+                return resultJson;
+            });
+
+            if (executionResult.status === 'dialog') {
+                return executionResult;
+            }
+
+            const resultJson = executionResult.result;
             console.log(`[CSProWasmService] executeAction result:`, resultJson);
             
             // Parse result if it's a JSON string
@@ -972,9 +1775,134 @@ class CSProWasmService {
                 // Path doesn't exist, that's okay
             }
         }
-
-        console.log(`[CSProWasmService] Found ${assets.length} embedded assets`);
+        
         return assets;
+    }
+
+    /**
+     * Sync files from server disk to WASM filesystem
+     * Only syncs data files (.csdb, .log, .not, .dat, .txt)
+     */
+    _syncFilesFromDisk(session) {
+        if (!session.appName || !session.appDir) return;
+        
+        const appName = session.appName;
+        const wasmDir = session.appDir;
+        const serverAppDir = path.join(__dirname, 'storage/applications', appName);
+        
+        console.log(`[CSProWasmService] Syncing files for ${appName} from ${serverAppDir} to ${wasmDir}`);
+        
+        if (!fs.existsSync(serverAppDir)) {
+            console.warn(`[CSProWasmService] Server app directory not found: ${serverAppDir}`);
+            return;
+        }
+        
+        const FS = this.Module.FS;
+        
+        // Recursive function to walk server FS and copy files to WASM
+        const syncDir = (currentServerDir, relativePath = '') => {
+            try {
+                const entries = fs.readdirSync(currentServerDir);
+                
+                for (const entry of entries) {
+                    const fullServerPath = path.join(currentServerDir, entry);
+                    const fullRelativePath = relativePath ? `${relativePath}/${entry}` : entry;
+                    const stat = fs.statSync(fullServerPath);
+                    
+                    if (stat.isDirectory()) {
+                        syncDir(fullServerPath, fullRelativePath);
+                    } else {
+                        // Check extension
+                        const ext = path.extname(entry).toLowerCase();
+                        const isDataFile = ['.csdb', '.log', '.not', '.dat', '.txt', '.lst'].includes(ext) || 
+                                           entry.endsWith('.csdb.log'); // Special case for CSDB log
+                        
+                        if (isDataFile) {
+                            // Read from Server
+                            const content = fs.readFileSync(fullServerPath);
+                            
+                            // Write to WASM
+                            const targetPath = `${wasmDir}/${fullRelativePath}`;
+                            const targetDir = path.dirname(targetPath);
+                            
+                            this._ensureDirectory(FS, targetDir);
+                            
+                            FS.writeFile(targetPath, content);
+                            console.log(`[CSProWasmService] Synced file to WASM: ${fullRelativePath}`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`[CSProWasmService] Error syncing directory ${currentServerDir}:`, e);
+            }
+        };
+        
+        syncDir(serverAppDir);
+    }
+
+    /**
+     * Sync files from WASM filesystem to server disk
+     * Only syncs data files (.csdb, .log, .not, .dat, .txt)
+     */
+    _syncFilesToDisk(session) {
+        if (!session.appName || !session.appDir) return;
+        
+        const appName = session.appName;
+        const wasmDir = session.appDir;
+        const serverAppDir = path.join(__dirname, 'storage/applications', appName);
+        
+        console.log(`[CSProWasmService] Syncing files for ${appName} from ${wasmDir} to ${serverAppDir}`);
+        
+        if (!fs.existsSync(serverAppDir)) {
+            console.warn(`[CSProWasmService] Server app directory not found: ${serverAppDir}`);
+            return;
+        }
+        
+        const FS = this.Module.FS;
+        
+        // Recursive function to walk WASM FS and copy files
+        const syncDir = (currentWasmDir, relativePath = '') => {
+            try {
+                const entries = FS.readdir(currentWasmDir);
+                
+                for (const entry of entries) {
+                    if (entry === '.' || entry === '..') continue;
+                    
+                    const fullWasmPath = `${currentWasmDir}/${entry}`;
+                    const fullRelativePath = relativePath ? `${relativePath}/${entry}` : entry;
+                    const stat = FS.stat(fullWasmPath);
+                    
+                    if (FS.isDir(stat.mode)) {
+                        syncDir(fullWasmPath, fullRelativePath);
+                    } else {
+                        // Check extension
+                        const ext = path.extname(entry).toLowerCase();
+                        const isDataFile = ['.csdb', '.log', '.not', '.dat', '.txt', '.lst'].includes(ext) || 
+                                           entry.endsWith('.csdb.log'); // Special case for CSDB log
+                        
+                        if (isDataFile) {
+                            // Read from WASM
+                            const content = FS.readFile(fullWasmPath);
+                            
+                            // Write to server disk
+                            const targetPath = path.join(serverAppDir, fullRelativePath);
+                            const targetDir = path.dirname(targetPath);
+                            
+                            if (!fs.existsSync(targetDir)) {
+                                fs.mkdirSync(targetDir, { recursive: true });
+                            }
+                            
+                            fs.writeFileSync(targetPath, content);
+                            console.log(`[CSProWasmService] Synced file: ${fullRelativePath}`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`[CSProWasmService] Error syncing directory ${currentWasmDir}:`, e);
+            }
+        };
+        
+        syncDir(wasmDir);
     }
 
     /**

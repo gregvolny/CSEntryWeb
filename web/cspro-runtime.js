@@ -686,6 +686,76 @@ class CSProRuntime {
     }
 
     /**
+     * Mount persistent storage (OPFS or IDBFS)
+     * @param {string} mountPoint - Directory to mount (default: /data)
+     * @returns {Promise<string>} - Type of storage mounted ('OPFS', 'IDBFS', or null)
+     */
+    async mountPersistentStorage(mountPoint = '/data') {
+        const FS = this.getFS();
+        if (!FS) return null;
+
+        try {
+            // Create mount point if it doesn't exist
+            try {
+                FS.mkdir(mountPoint);
+            } catch (e) { 
+                if (e.code !== 'EEXIST') console.warn('[CSProRuntime] mkdir error:', e);
+            }
+
+            // Try OPFS first (if supported by Emscripten build)
+            // Note: Requires -lbfs.js or similar in build
+            if (FS.filesystems && FS.filesystems.OPFS) {
+                console.log('[CSProRuntime] Mounting OPFS at', mountPoint);
+                FS.mount(FS.filesystems.OPFS, {}, mountPoint);
+                return 'OPFS';
+            } 
+            // Fallback to IDBFS (IndexedDB)
+            else if (FS.filesystems && FS.filesystems.IDBFS) {
+                console.log('[CSProRuntime] Mounting IDBFS at', mountPoint);
+                FS.mount(FS.filesystems.IDBFS, {}, mountPoint);
+                
+                // Sync from DB to Memory (populate)
+                await new Promise((resolve, reject) => {
+                    FS.syncfs(true, (err) => {
+                        if (err) {
+                            console.error('[CSProRuntime] IDBFS sync error:', err);
+                            reject(err);
+                        } else {
+                            console.log('[CSProRuntime] IDBFS synced successfully');
+                            resolve();
+                        }
+                    });
+                });
+                return 'IDBFS';
+            } else {
+                console.warn('[CSProRuntime] No persistent filesystem backend available');
+            }
+        } catch (e) {
+            console.error('[CSProRuntime] Failed to mount storage:', e);
+        }
+        return null;
+    }
+
+    /**
+     * Sync persistent storage (required for IDBFS)
+     * @param {boolean} populate - true to populate from DB, false to persist to DB
+     */
+    async syncStorage(populate = false) {
+        const FS = this.getFS();
+        // Only IDBFS requires manual sync
+        // OPFS is auto-persisting
+        // We check if the mount point is IDBFS, but simpler to just call syncfs if available
+        if (FS && FS.syncfs) {
+             return new Promise((resolve, reject) => {
+                FS.syncfs(populate, (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+        }
+    }
+
+    /**
      * Register a dialog callback
      */
     onDialog(type, callback) {

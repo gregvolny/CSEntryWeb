@@ -10,28 +10,14 @@
     <link rel="stylesheet" href="/external/bootstrap/bootstrap-icons.css">
     <link rel="stylesheet" href="/css/dialogs.css">
 
-    <!-- Action invoker - detect web mode and use appropriate version -->
+    <!-- Unified Action invoker - auto-detects environment -->
+    <script src="../action-invoker.js"></script>
     <script>
-        // Detect web mode from URL parameter or iframe context
-        const isWebMode = (new URLSearchParams(window.location.search).has('web')) || 
-                          (window.parent !== window && typeof AndroidActionInvoker === 'undefined' && 
-                           (typeof window.chrome === 'undefined' || typeof window.chrome.webview === 'undefined'));
+        // Create global CS instance - unified action-invoker handles environment detection
+        window.CS = new CSProActionInvoker('');
         
-        if (isWebMode) {
-            // Web mode - load web action invoker
-            document.write('<script src="action-invoker-web.js"><\/script>');
-        } else {
-            // Native mode - load native action invoker
-            document.write('<script src="/action-invoker.js"><\/script>');
-        }
-    </script>
-    <script>
-        // After action invoker is loaded, initialize for web mode
-        if (typeof isWebMode !== 'undefined' && isWebMode) {
-            // Create global CS instance using web action invoker
-            window.CS = new CSProActionInvoker('');
-            
-            // Signal ready to parent
+        // Signal ready to parent (for web mode iframe dialogs)
+        if (CSProEnvironment.isWebMode() && window.parent !== window) {
             window.parent.postMessage({ type: 'cspro-dialog-ready' }, '*');
         }
     </script>
@@ -164,7 +150,7 @@
         <div id="mContainer" class="container-fluid my-dialog errmsg-dialog" style="max-width:100%">
             <div id="mTitle" class="row my-dialog-header">
                 <div class="col withNewline">
-                    {{title}}
+                    {{{title}}}
                 </div>
                 <div class="btn-close my-close-button btn-sm" aria-label="Close" onclick="CS.UI.closeDialog();">
                 </div>

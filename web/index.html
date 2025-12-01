@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>CSEntry Web</title>
     <style>
         html, body {
@@ -19,13 +22,16 @@
             height: 100%;
         }
     </style>
+    
+    <!-- Action invoker for CSPro dialogs -->
+    <script src="action-invoker.js"></script>
 </head>
 <body>
     <!-- CSEntry MFC-Style View - Port of Windows MFC CSEntry -->
     <csentry-mfc-view id="csentry"></csentry-mfc-view>
 
     <script type="module">
-        import './csentry-mfc-view-modular.js';
+        import './csentry-mfc-view-modular.js?v=20251201_0006';
     </script>
 </body>
 </html>
