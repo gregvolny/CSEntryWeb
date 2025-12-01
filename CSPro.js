@@ -88,7 +88,7 @@ if (ENVIRONMENT_IS_NODE) {
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
-// include: C:\Users\Admin\AppData\Local\Temp\tmpcjc2yukw.js
+// include: C:\Users\Admin\AppData\Local\Temp\tmph2ts68ji.js
 
   if (!Module['expectedDataFileDownloads']) Module['expectedDataFileDownloads'] = 0;
   Module['expectedDataFileDownloads']++;
@@ -249,21 +249,21 @@ Module['FS_createPath']("/Assets/html/utilities", "spec-file-downgrader", true, 
 
   })();
 
-// end include: C:\Users\Admin\AppData\Local\Temp\tmpcjc2yukw.js
-// include: C:\Users\Admin\AppData\Local\Temp\tmpn094o5zl.js
+// end include: C:\Users\Admin\AppData\Local\Temp\tmph2ts68ji.js
+// include: C:\Users\Admin\AppData\Local\Temp\tmpngl1asg8.js
 
     // All the pre-js content up to here must remain later on, we need to run
     // it.
     if ((typeof ENVIRONMENT_IS_WASM_WORKER != 'undefined' && ENVIRONMENT_IS_WASM_WORKER) || (typeof ENVIRONMENT_IS_PTHREAD != 'undefined' && ENVIRONMENT_IS_PTHREAD) || (typeof ENVIRONMENT_IS_AUDIO_WORKLET != 'undefined' && ENVIRONMENT_IS_AUDIO_WORKLET)) Module['preRun'] = [];
     var necessaryPreJSTasks = Module['preRun'].slice();
-  // end include: C:\Users\Admin\AppData\Local\Temp\tmpn094o5zl.js
-// include: C:\Users\Admin\AppData\Local\Temp\tmp7eapq29q.js
+  // end include: C:\Users\Admin\AppData\Local\Temp\tmpngl1asg8.js
+// include: C:\Users\Admin\AppData\Local\Temp\tmp1uuxp8zs.js
 
     if (!Module['preRun']) throw 'Module.preRun should exist because file support used it; did a pre-js delete it?';
     necessaryPreJSTasks.forEach((task) => {
       if (Module['preRun'].indexOf(task) < 0) throw 'All preRun tasks that exist before user pre-js code should remain after; did you replace Module or modify Module.preRun?';
     });
-  // end include: C:\Users\Admin\AppData\Local\Temp\tmp7eapq29q.js
+  // end include: C:\Users\Admin\AppData\Local\Temp\tmp1uuxp8zs.js
 
 
 var arguments_ = [];
@@ -7590,8 +7590,8 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('fetchSettings');
 }
 var ASM_CONSTS = {
-  1362220: ($0) => { var text = UTF8ToString($0); if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(function(err) { console.warn('Could not copy text to clipboard:', err); }); } else { var textArea = document.createElement("textarea"); textArea.value = text; textArea.style.position = "fixed"; textArea.style.left = "-999999px"; document.body.appendChild(textArea); textArea.select(); try { document.execCommand('copy'); } catch (err) { console.warn('Fallback clipboard copy failed:', err); } document.body.removeChild(textArea); } },  
- 1362787: ($0) => { console.error("[CSPro Error]", UTF8ToString($0)); alert(UTF8ToString($0)); }
+  1414796: ($0) => { var text = UTF8ToString($0); if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(function(err) { console.warn('Could not copy text to clipboard:', err); }); } else { var textArea = document.createElement("textarea"); textArea.value = text; textArea.style.position = "fixed"; textArea.style.left = "-999999px"; document.body.appendChild(textArea); textArea.select(); try { document.execCommand('copy'); } catch (err) { console.warn('Fallback clipboard copy failed:', err); } document.body.removeChild(textArea); } },  
+ 1415363: ($0) => { console.error("[CSPro Error]", UTF8ToString($0)); alert(UTF8ToString($0)); }
 };
 function __asyncjs__jspi_showDialog(dialogName,inputDataJson) { return Asyncify.handleAsync(async () => { console.log("[JSPI] showDialog called:", UTF8ToString(dialogName)); try { const name = UTF8ToString(dialogName); const inputData = UTF8ToString(inputDataJson); if (typeof window.CSProDialogHandler !== 'undefined' && typeof window.CSProDialogHandler.showDialogAsync === 'function') { const result = await window.CSProDialogHandler.showDialogAsync(name, inputData); if (result) { const len = lengthBytesUTF8(result) + 1; const buf = _malloc(len); stringToUTF8(result, buf, len); return buf; } } if (name === 'errmsg') { let parsedInput = {}; try { parsedInput = JSON.parse(inputData); } catch(e) {} const message = parsedInput.message || 'Message'; const title = parsedInput.title || ''; const buttons = parsedInput.buttons || [{caption: 'OK', index: 1}]; let selectedIndex = 1; if (buttons.length > 1) { const confirmed = confirm(title ? (title + '\n\n' + message) : message); selectedIndex = confirmed ? 1 : 2; } else { alert(title ? (title + '\n\n' + message) : message); selectedIndex = 1; } const result = JSON.stringify({index: selectedIndex}); const len = lengthBytesUTF8(result) + 1; const buf = _malloc(len); stringToUTF8(result, buf, len); return buf; } return 0; } catch (e) { console.error("[JSPI] showDialog error:", e); return 0; } }); }
 __asyncjs__jspi_showDialog.sig = 'iii';
